@@ -95,6 +95,8 @@ enum Param {
     Hiss,
     Cutoff,
     Resonance,
+    FEnv,
+    FDecay,
     Drive,
     RevAmount,
     RevRoom,
@@ -106,7 +108,7 @@ enum Param {
     Chaos,
 }
 impl Param {
-    const ALL: [Param; 18] = [
+    const ALL: [Param; 20] = [
         Param::Attack,
         Param::Decay,
         Param::Sustain,
@@ -116,6 +118,8 @@ impl Param {
         Param::Hiss,
         Param::Cutoff,
         Param::Resonance,
+        Param::FEnv,
+        Param::FDecay,
         Param::Drive,
         Param::RevAmount,
         Param::RevRoom,
@@ -305,23 +309,25 @@ struct Preset {
     drive: f32,
     comp: f32,
     hiss: f32,
+    fenv: f32,
+    fdecay: f32,
     bits_idx: usize,
 }
 
 impl Preset {
     fn to_line(&self) -> String {
         format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             self.wave, self.octave, self.attack, self.decay, self.sustain, self.release,
             self.drift, self.noise, self.cutoff, self.resonance, self.reverb_amt, self.volume,
             self.room, self.time, self.diffusion, self.chaos, self.bits_idx, self.drive, self.comp,
-            self.hiss,
+            self.hiss, self.fenv, self.fdecay,
         )
     }
 
     fn from_line(s: &str) -> Option<Preset> {
         let p: Vec<&str> = s.split(',').collect();
-        if p.len() != 20 {
+        if p.len() != 22 {
             return None;
         }
         Some(Preset {
@@ -345,6 +351,8 @@ impl Preset {
             drive: p[17].parse().ok()?,
             comp: p[18].parse().ok()?,
             hiss: p[19].parse().ok()?,
+            fenv: p[20].parse().ok()?,
+            fdecay: p[21].parse().ok()?,
         })
     }
 }
@@ -409,10 +417,13 @@ struct App {
     release: f32,
     drift: f32,
     noise: f32,
-    hiss: f32,  // constant background noise floor
-    drive: f32, // mid saturator dry/wet (0 = clean)
-    comp: f32,  // output compression amount (drive into the limiter)
-    chaos: f32, // global instability: continuous wander + per-note variation
+    hiss: f32,    // constant background noise floor
+    drive: f32,   // mid saturator dry/wet (0 = clean)
+    comp: f32,    // output compression amount (drive into the limiter)
+    fenv: f32,    // filter envelope amount (cutoff sweep on each note)
+    fdecay: f32,  // filter envelope decay time (s)
+    last_note: f32, // time of the most recent note-on, for the filter envelope
+    chaos: f32,   // global instability: continuous wander + per-note variation
     octave: i32,
     selected: Param,
     active: HashMap<char, (EventId, Shared)>, // held notes -> (sequencer event, gate)
@@ -461,6 +472,7 @@ impl App {
     /// Returns (hz, attack, decay, sustain, release, drift_amt, noise_amt, seed).
     #[allow(clippy::type_complexity)]
     fn voice_params(&mut self, semitone: i32) -> (f32, f32, f32, f32, f32, f32, f32, u64) {
+        self.last_note = self.clock.elapsed().as_secs_f32(); // retrigger the filter envelope
         let c = self.chaos;
         let a = (self.attack * (1.0 + 0.3 * c * self.rnd())).clamp(0.001, 2.0);
         let d = (self.decay * (1.0 + 0.3 * c * self.rnd())).clamp(0.001, 2.0);
@@ -488,6 +500,8 @@ impl App {
                 self.cutoff = (self.cutoff * factor).clamp(20.0, 20000.0);
             }
             Param::Resonance => self.resonance = (self.resonance + d * 0.05).clamp(0.0, 0.98),
+            Param::FEnv => self.fenv = (self.fenv + d * 0.05).clamp(0.0, 1.0),
+            Param::FDecay => self.fdecay = (self.fdecay + d * 0.05).clamp(0.02, 2.0),
             Param::Drive => self.drive = (self.drive + d * 0.05).clamp(0.0, 1.0),
             Param::RevAmount => self.reverb_amt = (self.reverb_amt + d * 0.05).clamp(0.0, 1.0),
             Param::RevRoom => {
@@ -518,7 +532,14 @@ impl App {
     fn tick_chaos(&mut self, t: f32) {
         let c = self.chaos;
         let w = |seed: u64, rate: f32| spline_noise::<f32>(seed, t * rate);
-        let cutoff = (self.cutoff * (1.0 + 0.35 * c * w(0x01, 0.8))).clamp(20.0, 20000.0);
+        // Filter envelope: fast attack on note-on, exponential decay back to the base cutoff.
+        let fenv = if self.fenv > 0.0 {
+            let dt = (t - self.last_note).max(0.0);
+            self.fenv * 9000.0 * (-dt / self.fdecay.max(0.01)).exp()
+        } else {
+            0.0
+        };
+        let cutoff = ((self.cutoff + fenv) * (1.0 + 0.35 * c * w(0x01, 0.8))).clamp(20.0, 20000.0);
         let reso = (self.resonance + 0.15 * c * w(0x02, 0.5)).clamp(0.0, 0.98);
         let reverb = (self.reverb_amt + 0.15 * c * w(0x03, 0.3)).clamp(0.0, 1.0);
         let vol = (self.volume + 0.12 * c * w(0x04, 1.1)).clamp(0.0, 1.0);
@@ -578,6 +599,8 @@ impl App {
             drive: self.drive,
             comp: self.comp,
             hiss: self.hiss,
+            fenv: self.fenv,
+            fdecay: self.fdecay,
             bits_idx: self.bits_idx,
         }
     }
@@ -602,6 +625,8 @@ impl App {
         self.drive = p.drive;
         self.comp = p.comp;
         self.hiss = p.hiss;
+        self.fenv = p.fenv;
+        self.fdecay = p.fdecay;
         self.bits_idx = std::cmp::min(p.bits_idx, BIT_OPTIONS.len() - 1);
         self.quant.set_value(BIT_OPTIONS[self.bits_idx].1);
         self.rebuild_reverb(); // room/time/diffusion may have changed
@@ -771,7 +796,7 @@ fn ui(f: &mut Frame, app: &App) {
         .constraints([
             Constraint::Length(1), // [0] waveform + octave
             Constraint::Length(1), // [1] spacer
-            Constraint::Length(9), // [2] envelope curve + parameter columns
+            Constraint::Length(11), // [2] envelope curve + parameter columns
             Constraint::Length(1), // [3] spacer
             Constraint::Length(3), // [4] piano
             Constraint::Min(1),    // [5] footer
@@ -874,6 +899,8 @@ fn ui(f: &mut Frame, app: &App) {
         param_row("Hiss", format!("{:.0}%", app.hiss * 100.0), app.hiss, sel(Param::Hiss)),
         param_row("Cutoff", format!("{:.0}Hz", cutoff), cutoff_ratio, sel(Param::Cutoff)),
         param_row("Reso", format!("{:.0}%", res / 0.98 * 100.0), res / 0.98, sel(Param::Resonance)),
+        param_row("F.Env", format!("{:.0}%", app.fenv * 100.0), app.fenv, sel(Param::FEnv)),
+        param_row("F.Decay", format!("{:.2}s", app.fdecay), app.fdecay / 2.0, sel(Param::FDecay)),
     ];
     f.render_widget(Paragraph::new(col_a), mid[1]);
 
@@ -1096,6 +1123,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         hiss: 0.0,
         drive: 0.0,
         comp: 0.0,
+        fenv: 0.0,
+        fdecay: 0.3,
+        last_note: -1000.0,
         chaos: 0.0,
         octave: 0,
         selected: Param::Attack,
