@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::io::{self, Stdout};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
@@ -99,9 +99,10 @@ enum Param {
     RevDiffusion,
     Volume,
     Bits,
+    Chaos,
 }
 impl Param {
-    const ALL: [Param; 14] = [
+    const ALL: [Param; 15] = [
         Param::Attack,
         Param::Decay,
         Param::Sustain,
@@ -116,6 +117,7 @@ impl Param {
         Param::RevDiffusion,
         Param::Volume,
         Param::Bits,
+        Param::Chaos,
     ];
     fn step(self, d: i32) -> Param {
         let i = Param::ALL.iter().position(|p| *p == self).unwrap() as i32;
@@ -248,12 +250,18 @@ struct App {
     sequencer: Sequencer, // frontend; pushing notes is the lock-free bridge to audio
     net: Net,             // frontend; kept for live reverb crossfades + keeps the backend alive
     reverb_id: NodeId,
-    cutoff: Shared,
-    resonance: Shared,
-    reverb_amt: Shared,
-    volume: Shared,
+    // audio-thread mirrors of the live params (written each frame from the base values below)
+    cutoff_sh: Shared,
+    reso_sh: Shared,
+    reverb_sh: Shared,
+    vol_sh: Shared,
     quant: Shared, // output bit-depth quantization levels (read in the audio callback)
     bits_idx: usize,
+    // base (user-set) values — chaos perturbs these on the way to the shareds / new notes
+    cutoff: f32,
+    resonance: f32,
+    reverb_amt: f32,
+    volume: f32,
     room: f32,
     time: f32,
     diffusion: f32,
@@ -264,10 +272,13 @@ struct App {
     release: f32,
     drift: f32,
     noise: f32,
+    chaos: f32, // global instability: continuous wander + per-note variation
     octave: i32,
     selected: Param,
     active: HashMap<char, (EventId, Shared)>, // held notes -> (sequencer event, gate)
     seed: u64,                                // per-voice drift seed source
+    rng: u64,                                 // per-note chaos RNG state
+    clock: Instant,                           // for continuous wander
     supports_release: bool,
 }
 
@@ -276,18 +287,8 @@ impl App {
         if self.active.contains_key(&key) {
             return;
         }
-        let hz = midi_hz((60 + semitone + 12 * self.octave) as f32);
-        let (voice, gate) = make_voice(
-            self.wave,
-            hz,
-            self.attack,
-            self.decay,
-            self.sustain,
-            self.release,
-            self.drift * 0.015,
-            self.noise * 0.5,
-            self.next_seed(),
-        );
+        let (hz, a, d, s, r, drift, noise, seed) = self.voice_params(semitone);
+        let (voice, gate) = make_voice(self.wave, hz, a, d, s, r, drift, noise, seed);
         let id = self
             .sequencer
             .push_relative(0.0, f64::INFINITY, Fade::Smooth, 0.004, 0.01, voice);
@@ -304,21 +305,27 @@ impl App {
 
     /// Fallback for terminals without key-release reporting: a fixed-length note.
     fn play_fixed(&mut self, semitone: i32) {
-        let hz = midi_hz((60 + semitone + 12 * self.octave) as f32);
-        let (voice, _gate) = make_voice(
-            self.wave,
-            hz,
-            self.attack,
-            self.decay,
-            self.sustain,
-            self.release,
-            self.drift * 0.015,
-            self.noise * 0.5,
-            self.next_seed(),
-        );
-        let len = (self.attack + self.decay + 0.4 + self.release) as f64;
+        let (hz, a, d, s, r, drift, noise, seed) = self.voice_params(semitone);
+        let (voice, _gate) = make_voice(self.wave, hz, a, d, s, r, drift, noise, seed);
+        let len = (a + d + 0.4 + r) as f64;
         self.sequencer
-            .push_relative(0.0, len, Fade::Smooth, 0.004, self.release as f64, voice);
+            .push_relative(0.0, len, Fade::Smooth, 0.004, r as f64, voice);
+    }
+
+    /// Per-note voice parameters, with chaos applied as random per-note variation.
+    /// Returns (hz, attack, decay, sustain, release, drift_amt, noise_amt, seed).
+    #[allow(clippy::type_complexity)]
+    fn voice_params(&mut self, semitone: i32) -> (f32, f32, f32, f32, f32, f32, f32, u64) {
+        let c = self.chaos;
+        let a = (self.attack * (1.0 + 0.3 * c * self.rnd())).clamp(0.001, 2.0);
+        let d = (self.decay * (1.0 + 0.3 * c * self.rnd())).clamp(0.001, 2.0);
+        let s = (self.sustain + 0.1 * c * self.rnd()).clamp(0.0, 1.0);
+        let r = (self.release * (1.0 + 0.3 * c * self.rnd())).clamp(0.001, 3.0);
+        let drift = (self.drift + 0.3 * c * self.rnd().abs()).clamp(0.0, 1.0) * 0.015;
+        let noise = (self.noise + 0.2 * c * self.rnd().abs()).clamp(0.0, 1.0) * 0.5;
+        let detune = 1.0 + 0.015 * c * self.rnd(); // up to ~+/-25 cents of broken tuning
+        let hz = midi_hz((60 + semitone + 12 * self.octave) as f32) * detune;
+        (hz, a, d, s, r, drift, noise, self.next_seed())
     }
 
     fn adjust(&mut self, d: i32) {
@@ -332,17 +339,10 @@ impl App {
             Param::Noise => self.noise = (self.noise + d * 0.05).clamp(0.0, 1.0),
             Param::Cutoff => {
                 let factor = if d > 0.0 { 1.25 } else { 1.0 / 1.25 };
-                let hz = (self.cutoff.value() * factor).clamp(20.0, 20000.0);
-                self.cutoff.set_value(hz);
+                self.cutoff = (self.cutoff * factor).clamp(20.0, 20000.0);
             }
-            Param::Resonance => {
-                let q = (self.resonance.value() + d * 0.05).clamp(0.0, 0.98);
-                self.resonance.set_value(q);
-            }
-            Param::RevAmount => {
-                let v = (self.reverb_amt.value() + d * 0.05).clamp(0.0, 1.0);
-                self.reverb_amt.set_value(v);
-            }
+            Param::Resonance => self.resonance = (self.resonance + d * 0.05).clamp(0.0, 0.98),
+            Param::RevAmount => self.reverb_amt = (self.reverb_amt + d * 0.05).clamp(0.0, 1.0),
             Param::RevRoom => {
                 self.room = (self.room + d).clamp(10.0, 30.0);
                 self.rebuild_reverb();
@@ -355,16 +355,29 @@ impl App {
                 self.diffusion = (self.diffusion + d * 0.05).clamp(0.0, 1.0);
                 self.rebuild_reverb();
             }
-            Param::Volume => {
-                let v = (self.volume.value() + d * 0.05).clamp(0.0, 1.0);
-                self.volume.set_value(v);
-            }
+            Param::Volume => self.volume = (self.volume + d * 0.05).clamp(0.0, 1.0),
             Param::Bits => {
                 let n = BIT_OPTIONS.len() as i32;
                 self.bits_idx = ((self.bits_idx as i32 + d as i32).rem_euclid(n)) as usize;
                 self.quant.set_value(BIT_OPTIONS[self.bits_idx].1);
             }
+            Param::Chaos => self.chaos = (self.chaos + d * 0.05).clamp(0.0, 1.0),
         }
+    }
+
+    /// Push base params (plus continuous chaos wander) to the audio-thread shareds. Called every
+    /// UI frame. Each live param wanders on its own slow, seeded noise so they drift independently.
+    fn tick_chaos(&mut self, t: f32) {
+        let c = self.chaos;
+        let w = |seed: u64, rate: f32| spline_noise::<f32>(seed, t * rate);
+        let cutoff = (self.cutoff * (1.0 + 0.35 * c * w(0x01, 0.8))).clamp(20.0, 20000.0);
+        let reso = (self.resonance + 0.15 * c * w(0x02, 0.5)).clamp(0.0, 0.98);
+        let reverb = (self.reverb_amt + 0.15 * c * w(0x03, 0.3)).clamp(0.0, 1.0);
+        let vol = (self.volume + 0.12 * c * w(0x04, 1.1)).clamp(0.0, 1.0);
+        self.cutoff_sh.set_value(cutoff);
+        self.reso_sh.set_value(reso);
+        self.reverb_sh.set_value(reverb);
+        self.vol_sh.set_value(vol);
     }
 
     /// Crossfade in a freshly built reverb node (room/time/diffusion changed the delay structure).
@@ -377,6 +390,16 @@ impl App {
     fn next_seed(&mut self) -> u64 {
         self.seed = self.seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
         self.seed
+    }
+
+    /// xorshift64 -> uniform in [-1, 1).
+    fn rnd(&mut self) -> f32 {
+        let mut x = self.rng;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.rng = x;
+        ((x >> 40) as f32 / (1u64 << 24) as f32) * 2.0 - 1.0
     }
 }
 
@@ -584,8 +607,8 @@ fn ui(f: &mut Frame, app: &App) {
     // column A — envelope + oscillator + filter
     let secs = |v: f32| format!("{:.0}ms", v * 1000.0);
     let sel = |p: Param| app.selected == p;
-    let cutoff = app.cutoff.value();
-    let res = app.resonance.value();
+    let cutoff = app.cutoff;
+    let res = app.resonance;
     let cutoff_ratio = (cutoff.max(20.0).ln() - 20f32.ln()) / (20000f32.ln() - 20f32.ln());
     let col_a = vec![
         param_row("Attack", secs(a), a / 2.0, sel(Param::Attack)),
@@ -599,9 +622,9 @@ fn ui(f: &mut Frame, app: &App) {
     ];
     f.render_widget(Paragraph::new(col_a), mid[1]);
 
-    // column B — reverb + output
-    let rv = app.reverb_amt.value();
-    let vol = app.volume.value();
+    // column B — reverb + output + chaos
+    let rv = app.reverb_amt;
+    let vol = app.volume;
     let col_b = vec![
         param_row("Reverb", format!("{:.0}%", rv * 100.0), rv, sel(Param::RevAmount)),
         param_row("Room", format!("{:.0}m", app.room), (app.room - 10.0) / 20.0, sel(Param::RevRoom)),
@@ -614,6 +637,7 @@ fn ui(f: &mut Frame, app: &App) {
             app.bits_idx as f32 / (BIT_OPTIONS.len() - 1) as f32,
             sel(Param::Bits),
         ),
+        param_row("Chaos", format!("{:.0}%", app.chaos * 100.0), app.chaos, sel(Param::Chaos)),
     ];
     f.render_widget(Paragraph::new(col_b), mid[2]);
 
@@ -726,18 +750,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     sequencer.set_sample_rate(sample_rate); // tune pushed voices to the device rate
     let seq_backend = sequencer.backend();
 
-    let cutoff = shared(8000.0);
-    let resonance = shared(0.2);
-    let reverb_amt = shared(0.25);
-    let volume = shared(0.5);
+    let cutoff_sh = shared(8000.0);
+    let reso_sh = shared(0.2);
+    let reverb_sh = shared(0.25);
+    let vol_sh = shared(0.5);
     let quant = shared(0.0); // bit-depth off by default
     let (room, time, diffusion) = (12.0_f32, 2.0_f32, 0.5_f32);
     let (mut net, reverb_id) = build_net(
         Box::new(seq_backend),
-        &cutoff,
-        &resonance,
-        &reverb_amt,
-        &volume,
+        &cutoff_sh,
+        &reso_sh,
+        &reverb_sh,
+        &vol_sh,
         room,
         time,
         diffusion,
@@ -781,12 +805,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sequencer,
         net,
         reverb_id,
-        cutoff,
-        resonance,
-        reverb_amt,
-        volume,
+        cutoff_sh,
+        reso_sh,
+        reverb_sh,
+        vol_sh,
         quant,
         bits_idx: 0,
+        cutoff: 8000.0,
+        resonance: 0.2,
+        reverb_amt: 0.25,
+        volume: 0.5,
         room,
         time,
         diffusion,
@@ -797,16 +825,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         release: 0.3,
         drift: 0.3,
         noise: 0.0,
+        chaos: 0.0,
         octave: 0,
         selected: Param::Attack,
         active: HashMap::new(),
         seed: 0,
+        rng: 0x853c_49e6_748f_ea9b,
+        clock: Instant::now(),
         supports_release: supports,
     };
 
     // --- event loop ---
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         loop {
+            let t = app.clock.elapsed().as_secs_f32();
+            app.tick_chaos(t);
             terminal.draw(|f| ui(f, &app))?;
             if event::poll(Duration::from_millis(16))? {
                 if let Event::Key(k) = event::read()? {
