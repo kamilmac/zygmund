@@ -92,6 +92,7 @@ enum Param {
     Release,
     Drift,
     Noise,
+    Hiss,
     Cutoff,
     Resonance,
     Drive,
@@ -105,13 +106,14 @@ enum Param {
     Chaos,
 }
 impl Param {
-    const ALL: [Param; 17] = [
+    const ALL: [Param; 18] = [
         Param::Attack,
         Param::Decay,
         Param::Sustain,
         Param::Release,
         Param::Drift,
         Param::Noise,
+        Param::Hiss,
         Param::Cutoff,
         Param::Resonance,
         Param::Drive,
@@ -225,6 +227,7 @@ fn build_net(
     reverb_amt: &Shared,
     volume: &Shared,
     comp: &Shared,
+    hiss: &Shared,
     room: f32,
     time: f32,
     diffusion: f32,
@@ -243,6 +246,10 @@ fn build_net(
         >> ((1.0 - var(reverb_amt) >> follow(0.01) >> split::<U2>()) * multipass::<U2>()
             & (var(reverb_amt) >> follow(0.01) >> split::<U2>()) * reverb);
     net = net >> ((var(volume) >> follow(0.02) >> split::<U2>()) * multipass::<U2>());
+    // Constant analog-style noise floor (pink, independent of note level) added to the bus.
+    net = net
+        >> (multipass::<U2>()
+            + ((pink() | pink()) * (var(hiss) >> follow(0.05) >> split::<U2>())));
     // Output compressor: drive into a lookahead limiter to gently squash peaks.
     net = net
         >> ((var(comp) >> follow(0.02) >> split::<U2>()) * multipass::<U2>())
@@ -297,22 +304,24 @@ struct Preset {
     chaos: f32,
     drive: f32,
     comp: f32,
+    hiss: f32,
     bits_idx: usize,
 }
 
 impl Preset {
     fn to_line(&self) -> String {
         format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             self.wave, self.octave, self.attack, self.decay, self.sustain, self.release,
             self.drift, self.noise, self.cutoff, self.resonance, self.reverb_amt, self.volume,
             self.room, self.time, self.diffusion, self.chaos, self.bits_idx, self.drive, self.comp,
+            self.hiss,
         )
     }
 
     fn from_line(s: &str) -> Option<Preset> {
         let p: Vec<&str> = s.split(',').collect();
-        if p.len() != 19 {
+        if p.len() != 20 {
             return None;
         }
         Some(Preset {
@@ -335,6 +344,7 @@ impl Preset {
             bits_idx: p[16].parse().ok()?,
             drive: p[17].parse().ok()?,
             comp: p[18].parse().ok()?,
+            hiss: p[19].parse().ok()?,
         })
     }
 }
@@ -380,6 +390,7 @@ struct App {
     reverb_sh: Shared,
     vol_sh: Shared,
     comp_sh: Shared,
+    hiss_sh: Shared,
     pitch_mod: Shared, // live global pitch multiplier (~1.0); chaos bends held notes through it
     quant: Shared,     // output bit-depth quantization levels (read in the audio callback)
     bits_idx: usize,
@@ -398,6 +409,7 @@ struct App {
     release: f32,
     drift: f32,
     noise: f32,
+    hiss: f32,  // constant background noise floor
     drive: f32, // mid saturator dry/wet (0 = clean)
     comp: f32,  // output compression amount (drive into the limiter)
     chaos: f32, // global instability: continuous wander + per-note variation
@@ -470,6 +482,7 @@ impl App {
             Param::Release => self.release = (self.release + d * 0.05).clamp(0.001, 3.0),
             Param::Drift => self.drift = (self.drift + d * 0.05).clamp(0.0, 1.0),
             Param::Noise => self.noise = (self.noise + d * 0.05).clamp(0.0, 1.0),
+            Param::Hiss => self.hiss = (self.hiss + d * 0.05).clamp(0.0, 1.0),
             Param::Cutoff => {
                 let factor = if d > 0.0 { 1.25 } else { 1.0 / 1.25 };
                 self.cutoff = (self.cutoff * factor).clamp(20.0, 20000.0);
@@ -518,6 +531,7 @@ impl App {
         self.reverb_sh.set_value(reverb);
         self.vol_sh.set_value(vol);
         self.comp_sh.set_value(1.0 + 3.0 * self.comp); // pre-gain into the limiter
+        self.hiss_sh.set_value(self.hiss * 0.03); // subtle noise floor
         self.pitch_mod.set_value(pitch_mod);
     }
 
@@ -563,6 +577,7 @@ impl App {
             chaos: self.chaos,
             drive: self.drive,
             comp: self.comp,
+            hiss: self.hiss,
             bits_idx: self.bits_idx,
         }
     }
@@ -586,6 +601,7 @@ impl App {
         self.chaos = p.chaos;
         self.drive = p.drive;
         self.comp = p.comp;
+        self.hiss = p.hiss;
         self.bits_idx = std::cmp::min(p.bits_idx, BIT_OPTIONS.len() - 1);
         self.quant.set_value(BIT_OPTIONS[self.bits_idx].1);
         self.rebuild_reverb(); // room/time/diffusion may have changed
@@ -855,6 +871,7 @@ fn ui(f: &mut Frame, app: &App) {
         param_row("Release", secs(r), r / 3.0, sel(Param::Release)),
         param_row("Drift", format!("{:.0}%", app.drift * 100.0), app.drift, sel(Param::Drift)),
         param_row("Noise", format!("{:.0}%", app.noise * 100.0), app.noise, sel(Param::Noise)),
+        param_row("Hiss", format!("{:.0}%", app.hiss * 100.0), app.hiss, sel(Param::Hiss)),
         param_row("Cutoff", format!("{:.0}Hz", cutoff), cutoff_ratio, sel(Param::Cutoff)),
         param_row("Reso", format!("{:.0}%", res / 0.98 * 100.0), res / 0.98, sel(Param::Resonance)),
     ];
@@ -996,6 +1013,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reverb_sh = shared(0.25);
     let vol_sh = shared(0.5);
     let comp_sh = shared(1.0);
+    let hiss_sh = shared(0.0);
     let pitch_mod = shared(1.0);
     let quant = shared(0.0); // bit-depth off by default
     let (room, time, diffusion) = (12.0_f32, 2.0_f32, 0.5_f32);
@@ -1007,6 +1025,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &reverb_sh,
         &vol_sh,
         &comp_sh,
+        &hiss_sh,
         room,
         time,
         diffusion,
@@ -1056,6 +1075,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         reverb_sh,
         vol_sh,
         comp_sh,
+        hiss_sh,
         pitch_mod,
         quant,
         bits_idx: 0,
@@ -1073,6 +1093,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         release: 0.3,
         drift: 0.3,
         noise: 0.0,
+        hiss: 0.0,
         drive: 0.0,
         comp: 0.0,
         chaos: 0.0,
