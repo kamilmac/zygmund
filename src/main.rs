@@ -132,6 +132,7 @@ impl Param {
 /// `drift` is the analog-style pitch instability (fraction of pitch); each voice gets its own
 /// `seed` so notes in a chord wander independently. ADSR + drift bake in at build time.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn build_voice(
     wave: Wave,
     hz: f32,
@@ -143,12 +144,14 @@ fn build_voice(
     r: f32,
     drift: f32,
     noise_amt: f32,
+    pitch_mod: &Shared,
     seed: u64,
 ) -> Box<dyn AudioUnit> {
-    // Slow per-voice random pitch wander (~3 Hz), like an analog VCO that won't sit still.
+    // Pitch = per-voice drift wander * a live global pitch-mod (chaos bends held notes in real time).
     // prelude64's lfo passes time as f64, so keep the wander math in f64.
     let (hz, drift) = (hz as f64, drift as f64);
-    let pitch = lfo(move |t| hz * (1.0 + drift * spline_noise(seed, t * 3.0)));
+    let pm = pitch_mod.clone();
+    let pitch = lfo(move |t| hz * (1.0 + drift * spline_noise(seed, t * 3.0)) * pm.value() as f64);
     let env = var(gate) >> adsr_live(a, d, s, r);
     // oscillator + white noise, then shaped by the envelope and velocity
     match wave {
@@ -172,10 +175,11 @@ fn make_voice(
     r: f32,
     drift: f32,
     noise_amt: f32,
+    pitch_mod: &Shared,
     seed: u64,
 ) -> (Box<dyn AudioUnit>, Shared) {
     let gate = shared(0.0);
-    let mut voice = build_voice(wave, hz, VEL, &gate, a, d, s, r, drift, noise_amt, seed);
+    let mut voice = build_voice(wave, hz, VEL, &gate, a, d, s, r, drift, noise_amt, pitch_mod, seed);
     voice.allocate();
     voice.get_mono(); // observe gate<=0 once
     gate.set_value(1.0);
@@ -255,7 +259,8 @@ struct App {
     reso_sh: Shared,
     reverb_sh: Shared,
     vol_sh: Shared,
-    quant: Shared, // output bit-depth quantization levels (read in the audio callback)
+    pitch_mod: Shared, // live global pitch multiplier (~1.0); chaos bends held notes through it
+    quant: Shared,     // output bit-depth quantization levels (read in the audio callback)
     bits_idx: usize,
     // base (user-set) values — chaos perturbs these on the way to the shareds / new notes
     cutoff: f32,
@@ -288,7 +293,8 @@ impl App {
             return;
         }
         let (hz, a, d, s, r, drift, noise, seed) = self.voice_params(semitone);
-        let (voice, gate) = make_voice(self.wave, hz, a, d, s, r, drift, noise, seed);
+        let (voice, gate) =
+            make_voice(self.wave, hz, a, d, s, r, drift, noise, &self.pitch_mod, seed);
         let id = self
             .sequencer
             .push_relative(0.0, f64::INFINITY, Fade::Smooth, 0.004, 0.01, voice);
@@ -306,7 +312,8 @@ impl App {
     /// Fallback for terminals without key-release reporting: a fixed-length note.
     fn play_fixed(&mut self, semitone: i32) {
         let (hz, a, d, s, r, drift, noise, seed) = self.voice_params(semitone);
-        let (voice, _gate) = make_voice(self.wave, hz, a, d, s, r, drift, noise, seed);
+        let (voice, _gate) =
+            make_voice(self.wave, hz, a, d, s, r, drift, noise, &self.pitch_mod, seed);
         let len = (a + d + 0.4 + r) as f64;
         self.sequencer
             .push_relative(0.0, len, Fade::Smooth, 0.004, r as f64, voice);
@@ -374,10 +381,13 @@ impl App {
         let reso = (self.resonance + 0.15 * c * w(0x02, 0.5)).clamp(0.0, 0.98);
         let reverb = (self.reverb_amt + 0.15 * c * w(0x03, 0.3)).clamp(0.0, 1.0);
         let vol = (self.volume + 0.12 * c * w(0x04, 1.1)).clamp(0.0, 1.0);
+        // Pitch wander: a couple of detuned noise layers so held notes warble like sick tape.
+        let pitch_mod = 1.0 + 0.02 * c * (0.7 * w(0x05, 1.3) + 0.3 * w(0x06, 4.0));
         self.cutoff_sh.set_value(cutoff);
         self.reso_sh.set_value(reso);
         self.reverb_sh.set_value(reverb);
         self.vol_sh.set_value(vol);
+        self.pitch_mod.set_value(pitch_mod);
     }
 
     /// Crossfade in a freshly built reverb node (room/time/diffusion changed the delay structure).
@@ -754,6 +764,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reso_sh = shared(0.2);
     let reverb_sh = shared(0.25);
     let vol_sh = shared(0.5);
+    let pitch_mod = shared(1.0);
     let quant = shared(0.0); // bit-depth off by default
     let (room, time, diffusion) = (12.0_f32, 2.0_f32, 0.5_f32);
     let (mut net, reverb_id) = build_net(
@@ -809,6 +820,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         reso_sh,
         reverb_sh,
         vol_sh,
+        pitch_mod,
         quant,
         bits_idx: 0,
         cutoff: 8000.0,
