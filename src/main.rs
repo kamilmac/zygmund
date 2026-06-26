@@ -98,6 +98,8 @@ enum Param {
     FEnv,
     FDecay,
     Drive,
+    Delay,
+    DFeed,
     RevAmount,
     RevRoom,
     RevTime,
@@ -108,7 +110,7 @@ enum Param {
     Chaos,
 }
 impl Param {
-    const ALL: [Param; 20] = [
+    const ALL: [Param; 22] = [
         Param::Attack,
         Param::Decay,
         Param::Sustain,
@@ -121,6 +123,8 @@ impl Param {
         Param::FEnv,
         Param::FDecay,
         Param::Drive,
+        Param::Delay,
+        Param::DFeed,
         Param::RevAmount,
         Param::RevRoom,
         Param::RevTime,
@@ -212,6 +216,25 @@ fn create_reverb(room: f32, time: f32, diffusion: f32) -> Box<dyn AudioUnit> {
 /// Wrap the sequencer backend into the master stereo chain: pan -> dry/wet reverb -> volume.
 /// `reverb_amt` and `volume` are read live (smoothed); the reverb node is returned by id so its
 /// room/time/diffusion can be crossfaded live.
+/// A deliberately strange stereo delay. Each channel's delay time warbles on its own slow random
+/// LFO (echoes drift in pitch), the two channels run at an odd time ratio (0.33 s vs 0.49 s — a
+/// lopsided, non-rhythmic ping-pong), and the feedback path swaps L/R and darkens each repeat.
+/// `dfeed` sets the feedback (number of repeats).
+fn strange_delay(dfeed: &Shared) -> An<impl AudioNode<Inputs = U2, Outputs = U2>> {
+    let delay_l = (pass()
+        | lfo(|t: f64| 0.33 * (1.0 + 0.06 * spline_noise::<f64>(11, t * 0.7))))
+        >> tap_linear(0.02, 1.2);
+    let delay_r = (pass()
+        | lfo(|t: f64| 0.49 * (1.0 + 0.06 * spline_noise::<f64>(22, t * 0.5))))
+        >> tap_linear(0.02, 1.2);
+    feedback(
+        reverse::<U2>()
+            >> (delay_l | delay_r)
+            >> (lowpass_hz(2400.0, 1.0) | lowpass_hz(2400.0, 1.0))
+            >> ((var(dfeed) >> follow(0.05) >> split::<U2>()) * multipass::<U2>()),
+    )
+}
+
 /// Parallel mid-focused soft saturator (stereo): boost ~900 Hz into a tanh, then trim it back so
 /// the harmonics land in the midrange. Blended dry/wet by `drive` (0 = clean).
 fn saturator() -> An<impl AudioNode<Inputs = U2, Outputs = U2>> {
@@ -228,6 +251,8 @@ fn build_net(
     cutoff: &Shared,
     resonance: &Shared,
     drive: &Shared,
+    delay_mix: &Shared,
+    dfeed: &Shared,
     reverb_amt: &Shared,
     volume: &Shared,
     comp: &Shared,
@@ -245,6 +270,10 @@ fn build_net(
     net = net
         >> ((1.0 - var(drive) >> follow(0.01) >> split::<U2>()) * multipass::<U2>()
             & (var(drive) >> follow(0.01) >> split::<U2>()) * saturator());
+    // Strange delay (before the reverb), blended dry/wet by delay_mix.
+    net = net
+        >> ((1.0 - var(delay_mix) >> follow(0.01) >> split::<U2>()) * multipass::<U2>()
+            & (var(delay_mix) >> follow(0.01) >> split::<U2>()) * strange_delay(dfeed));
     let (reverb, reverb_id) = Net::wrap_id(create_reverb(room, time, diffusion));
     net = net
         >> ((1.0 - var(reverb_amt) >> follow(0.01) >> split::<U2>()) * multipass::<U2>()
@@ -311,23 +340,25 @@ struct Preset {
     hiss: f32,
     fenv: f32,
     fdecay: f32,
+    delay: f32,
+    dfeed: f32,
     bits_idx: usize,
 }
 
 impl Preset {
     fn to_line(&self) -> String {
         format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             self.wave, self.octave, self.attack, self.decay, self.sustain, self.release,
             self.drift, self.noise, self.cutoff, self.resonance, self.reverb_amt, self.volume,
             self.room, self.time, self.diffusion, self.chaos, self.bits_idx, self.drive, self.comp,
-            self.hiss, self.fenv, self.fdecay,
+            self.hiss, self.fenv, self.fdecay, self.delay, self.dfeed,
         )
     }
 
     fn from_line(s: &str) -> Option<Preset> {
         let p: Vec<&str> = s.split(',').collect();
-        if p.len() != 22 {
+        if p.len() != 24 {
             return None;
         }
         Some(Preset {
@@ -353,6 +384,8 @@ impl Preset {
             hiss: p[19].parse().ok()?,
             fenv: p[20].parse().ok()?,
             fdecay: p[21].parse().ok()?,
+            delay: p[22].parse().ok()?,
+            dfeed: p[23].parse().ok()?,
         })
     }
 }
@@ -395,6 +428,8 @@ struct App {
     cutoff_sh: Shared,
     reso_sh: Shared,
     drive_sh: Shared,
+    delay_sh: Shared,
+    dfeed_sh: Shared,
     reverb_sh: Shared,
     vol_sh: Shared,
     comp_sh: Shared,
@@ -419,6 +454,8 @@ struct App {
     noise: f32,
     hiss: f32,    // constant background noise floor
     drive: f32,   // mid saturator dry/wet (0 = clean)
+    delay: f32,   // strange delay dry/wet (0 = clean)
+    dfeed: f32,   // strange delay feedback (repeats)
     comp: f32,    // output compression amount (drive into the limiter)
     fenv: f32,    // filter envelope amount (cutoff sweep on each note)
     fdecay: f32,  // filter envelope decay time (s)
@@ -503,6 +540,8 @@ impl App {
             Param::FEnv => self.fenv = (self.fenv + d * 0.05).clamp(0.0, 1.0),
             Param::FDecay => self.fdecay = (self.fdecay + d * 0.05).clamp(0.02, 2.0),
             Param::Drive => self.drive = (self.drive + d * 0.05).clamp(0.0, 1.0),
+            Param::Delay => self.delay = (self.delay + d * 0.05).clamp(0.0, 1.0),
+            Param::DFeed => self.dfeed = (self.dfeed + d * 0.05).clamp(0.0, 0.9),
             Param::RevAmount => self.reverb_amt = (self.reverb_amt + d * 0.05).clamp(0.0, 1.0),
             Param::RevRoom => {
                 self.room = (self.room + d).clamp(10.0, 30.0);
@@ -549,6 +588,8 @@ impl App {
         self.cutoff_sh.set_value(cutoff);
         self.reso_sh.set_value(reso);
         self.drive_sh.set_value(drive);
+        self.delay_sh.set_value(self.delay);
+        self.dfeed_sh.set_value(self.dfeed);
         self.reverb_sh.set_value(reverb);
         self.vol_sh.set_value(vol);
         self.comp_sh.set_value(1.0 + 3.0 * self.comp); // pre-gain into the limiter
@@ -601,6 +642,8 @@ impl App {
             hiss: self.hiss,
             fenv: self.fenv,
             fdecay: self.fdecay,
+            delay: self.delay,
+            dfeed: self.dfeed,
             bits_idx: self.bits_idx,
         }
     }
@@ -627,6 +670,8 @@ impl App {
         self.hiss = p.hiss;
         self.fenv = p.fenv;
         self.fdecay = p.fdecay;
+        self.delay = p.delay;
+        self.dfeed = p.dfeed;
         self.bits_idx = std::cmp::min(p.bits_idx, BIT_OPTIONS.len() - 1);
         self.quant.set_value(BIT_OPTIONS[self.bits_idx].1);
         self.rebuild_reverb(); // room/time/diffusion may have changed
@@ -909,6 +954,8 @@ fn ui(f: &mut Frame, app: &App) {
     let vol = app.volume;
     let col_b = vec![
         param_row("Drive", format!("{:.0}%", app.drive * 100.0), app.drive, sel(Param::Drive)),
+        param_row("Delay", format!("{:.0}%", app.delay * 100.0), app.delay, sel(Param::Delay)),
+        param_row("D.Feed", format!("{:.0}%", app.dfeed / 0.9 * 100.0), app.dfeed / 0.9, sel(Param::DFeed)),
         param_row("Reverb", format!("{:.0}%", rv * 100.0), rv, sel(Param::RevAmount)),
         param_row("Room", format!("{:.0}m", app.room), (app.room - 10.0) / 20.0, sel(Param::RevRoom)),
         param_row("Time", format!("{:.2}s", app.time), app.time / 10.0, sel(Param::RevTime)),
@@ -1037,6 +1084,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cutoff_sh = shared(8000.0);
     let reso_sh = shared(0.2);
     let drive_sh = shared(0.0);
+    let delay_sh = shared(0.0);
+    let dfeed_sh = shared(0.35);
     let reverb_sh = shared(0.25);
     let vol_sh = shared(0.5);
     let comp_sh = shared(1.0);
@@ -1049,6 +1098,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &cutoff_sh,
         &reso_sh,
         &drive_sh,
+        &delay_sh,
+        &dfeed_sh,
         &reverb_sh,
         &vol_sh,
         &comp_sh,
@@ -1099,6 +1150,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cutoff_sh,
         reso_sh,
         drive_sh,
+        delay_sh,
+        dfeed_sh,
         reverb_sh,
         vol_sh,
         comp_sh,
@@ -1122,6 +1175,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         noise: 0.0,
         hiss: 0.0,
         drive: 0.0,
+        delay: 0.0,
+        dfeed: 0.35,
         comp: 0.0,
         fenv: 0.0,
         fdecay: 0.3,

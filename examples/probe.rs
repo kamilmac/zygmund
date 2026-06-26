@@ -39,6 +39,22 @@ fn main() {
     net = net
         >> ((1.0 - var(&drive) >> follow(0.01) >> split::<U2>()) * multipass::<U2>()
             & (var(&drive) >> follow(0.01) >> split::<U2>()) * (sat_l | sat_r));
+    // strange delay (feedback) engaged
+    let delay_mix = shared(0.6);
+    let dfeed = shared(0.7);
+    let dl = (pass() | lfo(|t: f64| 0.33 * (1.0 + 0.06 * spline_noise::<f64>(11, t * 0.7))))
+        >> tap_linear(0.02, 1.2);
+    let dr = (pass() | lfo(|t: f64| 0.49 * (1.0 + 0.06 * spline_noise::<f64>(22, t * 0.5))))
+        >> tap_linear(0.02, 1.2);
+    let dly = feedback(
+        reverse::<U2>()
+            >> (dl | dr)
+            >> (lowpass_hz(2400.0, 1.0) | lowpass_hz(2400.0, 1.0))
+            >> ((var(&dfeed) >> follow(0.05) >> split::<U2>()) * multipass::<U2>()),
+    );
+    net = net
+        >> ((1.0 - var(&delay_mix) >> follow(0.01) >> split::<U2>()) * multipass::<U2>()
+            & (var(&delay_mix) >> follow(0.01) >> split::<U2>()) * dly);
     let wet = reverb2_stereo(10.0, 2.0, 0.5, 1.0, highshelf_hz(5000.0, 1.0, db_amp(-1.0)));
     net = net
         >> ((1.0 - var(&reverb_amt) >> follow(0.01) >> split::<U2>()) * multipass::<U2>()
@@ -59,9 +75,13 @@ fn main() {
 
     let mut adapter = BlockRateAdapter::new(Box::new(net.backend()));
     let mut maxs = 0f32;
-    for _ in 0..(sr as usize) {
+    let mut any_nan = false;
+    for _ in 0..(3.0 * sr) as usize {
         let (l, _r) = adapter.get_stereo();
+        if !l.is_finite() {
+            any_nan = true;
+        }
         maxs = maxs.max(l.abs());
     }
-    println!("full path peak   = {maxs:.4}");
+    println!("full path peak   = {maxs:.4}  (3s w/ delay+fb, nan={any_nan})");
 }
