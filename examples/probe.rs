@@ -27,14 +27,26 @@ fn main() {
     let volume = shared(0.5);
     let cutoff = shared(8000.0);
     let resonance = shared(0.2);
+    let drive = shared(0.5); // saturator engaged
+    let comp = shared(2.5); // compressor pre-gain engaged
     let mut net = Net::wrap(Box::new(backend));
     net = net >> ((pass() | (var(&cutoff) >> follow(0.01)) | var(&resonance)) >> moog());
     net = net >> pan(0.0);
+    let sat_l =
+        bell_hz(900.0, 0.6, db_amp(6.0)) >> shape(Tanh(2.0)) >> bell_hz(900.0, 0.6, db_amp(-3.0));
+    let sat_r =
+        bell_hz(900.0, 0.6, db_amp(6.0)) >> shape(Tanh(2.0)) >> bell_hz(900.0, 0.6, db_amp(-3.0));
+    net = net
+        >> ((1.0 - var(&drive) >> follow(0.01) >> split::<U2>()) * multipass::<U2>()
+            & (var(&drive) >> follow(0.01) >> split::<U2>()) * (sat_l | sat_r));
     let wet = reverb2_stereo(10.0, 2.0, 0.5, 1.0, highshelf_hz(5000.0, 1.0, db_amp(-1.0)));
     net = net
         >> ((1.0 - var(&reverb_amt) >> follow(0.01) >> split::<U2>()) * multipass::<U2>()
             & (var(&reverb_amt) >> follow(0.01) >> split::<U2>()) * wet);
     net = net >> ((var(&volume) >> follow(0.02) >> split::<U2>()) * multipass::<U2>());
+    net = net
+        >> ((var(&comp) >> follow(0.02) >> split::<U2>()) * multipass::<U2>())
+        >> limiter_stereo(0.005, 0.1);
     net.set_sample_rate(sr);
 
     let g2 = shared(0.0);

@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::io::{self, Stdout};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -93,16 +94,18 @@ enum Param {
     Noise,
     Cutoff,
     Resonance,
+    Drive,
     RevAmount,
     RevRoom,
     RevTime,
     RevDiffusion,
     Volume,
+    Comp,
     Bits,
     Chaos,
 }
 impl Param {
-    const ALL: [Param; 15] = [
+    const ALL: [Param; 17] = [
         Param::Attack,
         Param::Decay,
         Param::Sustain,
@@ -111,11 +114,13 @@ impl Param {
         Param::Noise,
         Param::Cutoff,
         Param::Resonance,
+        Param::Drive,
         Param::RevAmount,
         Param::RevRoom,
         Param::RevTime,
         Param::RevDiffusion,
         Param::Volume,
+        Param::Comp,
         Param::Bits,
         Param::Chaos,
     ];
@@ -201,13 +206,25 @@ fn create_reverb(room: f32, time: f32, diffusion: f32) -> Box<dyn AudioUnit> {
 /// Wrap the sequencer backend into the master stereo chain: pan -> dry/wet reverb -> volume.
 /// `reverb_amt` and `volume` are read live (smoothed); the reverb node is returned by id so its
 /// room/time/diffusion can be crossfaded live.
+/// Parallel mid-focused soft saturator (stereo): boost ~900 Hz into a tanh, then trim it back so
+/// the harmonics land in the midrange. Blended dry/wet by `drive` (0 = clean).
+fn saturator() -> An<impl AudioNode<Inputs = U2, Outputs = U2>> {
+    let sat_l =
+        bell_hz(900.0, 0.6, db_amp(6.0)) >> shape(Tanh(2.0)) >> bell_hz(900.0, 0.6, db_amp(-3.0));
+    let sat_r =
+        bell_hz(900.0, 0.6, db_amp(6.0)) >> shape(Tanh(2.0)) >> bell_hz(900.0, 0.6, db_amp(-3.0));
+    sat_l | sat_r
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_net(
     seq_backend: Box<dyn AudioUnit>,
     cutoff: &Shared,
     resonance: &Shared,
+    drive: &Shared,
     reverb_amt: &Shared,
     volume: &Shared,
+    comp: &Shared,
     room: f32,
     time: f32,
     diffusion: f32,
@@ -217,11 +234,19 @@ fn build_net(
     // Moog ladder lowpass on the mono bus — cutoff/resonance are live (cutoff smoothed).
     net = net >> ((pass() | (var(cutoff) >> follow(0.01)) | var(resonance)) >> moog());
     net = net >> pan(0.0); // mono -> stereo
+    // Mid saturator, blended dry/wet by drive.
+    net = net
+        >> ((1.0 - var(drive) >> follow(0.01) >> split::<U2>()) * multipass::<U2>()
+            & (var(drive) >> follow(0.01) >> split::<U2>()) * saturator());
     let (reverb, reverb_id) = Net::wrap_id(create_reverb(room, time, diffusion));
     net = net
         >> ((1.0 - var(reverb_amt) >> follow(0.01) >> split::<U2>()) * multipass::<U2>()
             & (var(reverb_amt) >> follow(0.01) >> split::<U2>()) * reverb);
     net = net >> ((var(volume) >> follow(0.02) >> split::<U2>()) * multipass::<U2>());
+    // Output compressor: drive into a lookahead limiter to gently squash peaks.
+    net = net
+        >> ((var(comp) >> follow(0.02) >> split::<U2>()) * multipass::<U2>())
+        >> limiter_stereo(0.005, 0.1);
     net.set_sample_rate(sr);
     (net, reverb_id)
 }
@@ -249,6 +274,100 @@ fn key_to_semitone(c: char) -> Option<i32> {
     })
 }
 
+// ---------- presets ----------
+
+/// A full snapshot of the synth's settings, saved to disk so slots survive restarts.
+#[derive(Clone, Copy)]
+struct Preset {
+    wave: usize,
+    octave: i32,
+    attack: f32,
+    decay: f32,
+    sustain: f32,
+    release: f32,
+    drift: f32,
+    noise: f32,
+    cutoff: f32,
+    resonance: f32,
+    reverb_amt: f32,
+    volume: f32,
+    room: f32,
+    time: f32,
+    diffusion: f32,
+    chaos: f32,
+    drive: f32,
+    comp: f32,
+    bits_idx: usize,
+}
+
+impl Preset {
+    fn to_line(&self) -> String {
+        format!(
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            self.wave, self.octave, self.attack, self.decay, self.sustain, self.release,
+            self.drift, self.noise, self.cutoff, self.resonance, self.reverb_amt, self.volume,
+            self.room, self.time, self.diffusion, self.chaos, self.bits_idx, self.drive, self.comp,
+        )
+    }
+
+    fn from_line(s: &str) -> Option<Preset> {
+        let p: Vec<&str> = s.split(',').collect();
+        if p.len() != 19 {
+            return None;
+        }
+        Some(Preset {
+            wave: p[0].parse().ok()?,
+            octave: p[1].parse().ok()?,
+            attack: p[2].parse().ok()?,
+            decay: p[3].parse().ok()?,
+            sustain: p[4].parse().ok()?,
+            release: p[5].parse().ok()?,
+            drift: p[6].parse().ok()?,
+            noise: p[7].parse().ok()?,
+            cutoff: p[8].parse().ok()?,
+            resonance: p[9].parse().ok()?,
+            reverb_amt: p[10].parse().ok()?,
+            volume: p[11].parse().ok()?,
+            room: p[12].parse().ok()?,
+            time: p[13].parse().ok()?,
+            diffusion: p[14].parse().ok()?,
+            chaos: p[15].parse().ok()?,
+            bits_idx: p[16].parse().ok()?,
+            drive: p[17].parse().ok()?,
+            comp: p[18].parse().ok()?,
+        })
+    }
+}
+
+fn presets_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".tui-synth-presets.txt")
+}
+
+fn load_presets() -> [Option<Preset>; 9] {
+    let mut out = [None; 9];
+    if let Ok(text) = std::fs::read_to_string(presets_path()) {
+        for (i, line) in text.lines().take(9).enumerate() {
+            if line != "-" {
+                out[i] = Preset::from_line(line);
+            }
+        }
+    }
+    out
+}
+
+fn save_presets(presets: &[Option<Preset>; 9]) {
+    let mut s = String::new();
+    for p in presets {
+        match p {
+            Some(p) => s.push_str(&p.to_line()),
+            None => s.push('-'),
+        }
+        s.push('\n');
+    }
+    let _ = std::fs::write(presets_path(), s);
+}
+
 // ---------- application state (UI thread) ----------
 struct App {
     sequencer: Sequencer, // frontend; pushing notes is the lock-free bridge to audio
@@ -257,8 +376,10 @@ struct App {
     // audio-thread mirrors of the live params (written each frame from the base values below)
     cutoff_sh: Shared,
     reso_sh: Shared,
+    drive_sh: Shared,
     reverb_sh: Shared,
     vol_sh: Shared,
+    comp_sh: Shared,
     pitch_mod: Shared, // live global pitch multiplier (~1.0); chaos bends held notes through it
     quant: Shared,     // output bit-depth quantization levels (read in the audio callback)
     bits_idx: usize,
@@ -277,6 +398,8 @@ struct App {
     release: f32,
     drift: f32,
     noise: f32,
+    drive: f32, // mid saturator dry/wet (0 = clean)
+    comp: f32,  // output compression amount (drive into the limiter)
     chaos: f32, // global instability: continuous wander + per-note variation
     octave: i32,
     selected: Param,
@@ -284,6 +407,9 @@ struct App {
     seed: u64,                                // per-voice drift seed source
     rng: u64,                                 // per-note chaos RNG state
     clock: Instant,                           // for continuous wander
+    presets: [Option<Preset>; 9],
+    toast: Option<String>, // transient "saved/loaded preset N" notification
+    toast_until: f32,
     supports_release: bool,
 }
 
@@ -349,6 +475,7 @@ impl App {
                 self.cutoff = (self.cutoff * factor).clamp(20.0, 20000.0);
             }
             Param::Resonance => self.resonance = (self.resonance + d * 0.05).clamp(0.0, 0.98),
+            Param::Drive => self.drive = (self.drive + d * 0.05).clamp(0.0, 1.0),
             Param::RevAmount => self.reverb_amt = (self.reverb_amt + d * 0.05).clamp(0.0, 1.0),
             Param::RevRoom => {
                 self.room = (self.room + d).clamp(10.0, 30.0);
@@ -363,6 +490,7 @@ impl App {
                 self.rebuild_reverb();
             }
             Param::Volume => self.volume = (self.volume + d * 0.05).clamp(0.0, 1.0),
+            Param::Comp => self.comp = (self.comp + d * 0.05).clamp(0.0, 1.0),
             Param::Bits => {
                 let n = BIT_OPTIONS.len() as i32;
                 self.bits_idx = ((self.bits_idx as i32 + d as i32).rem_euclid(n)) as usize;
@@ -381,12 +509,15 @@ impl App {
         let reso = (self.resonance + 0.15 * c * w(0x02, 0.5)).clamp(0.0, 0.98);
         let reverb = (self.reverb_amt + 0.15 * c * w(0x03, 0.3)).clamp(0.0, 1.0);
         let vol = (self.volume + 0.12 * c * w(0x04, 1.1)).clamp(0.0, 1.0);
+        let drive = (self.drive + 0.1 * c * w(0x07, 0.6)).clamp(0.0, 1.0);
         // Pitch wander: a couple of detuned noise layers so held notes warble like sick tape.
         let pitch_mod = 1.0 + 0.02 * c * (0.7 * w(0x05, 1.3) + 0.3 * w(0x06, 4.0));
         self.cutoff_sh.set_value(cutoff);
         self.reso_sh.set_value(reso);
+        self.drive_sh.set_value(drive);
         self.reverb_sh.set_value(reverb);
         self.vol_sh.set_value(vol);
+        self.comp_sh.set_value(1.0 + 3.0 * self.comp); // pre-gain into the limiter
         self.pitch_mod.set_value(pitch_mod);
     }
 
@@ -411,6 +542,75 @@ impl App {
         self.rng = x;
         ((x >> 40) as f32 / (1u64 << 24) as f32) * 2.0 - 1.0
     }
+
+    fn capture(&self) -> Preset {
+        Preset {
+            wave: Wave::ALL.iter().position(|w| *w == self.wave).unwrap_or(0),
+            octave: self.octave,
+            attack: self.attack,
+            decay: self.decay,
+            sustain: self.sustain,
+            release: self.release,
+            drift: self.drift,
+            noise: self.noise,
+            cutoff: self.cutoff,
+            resonance: self.resonance,
+            reverb_amt: self.reverb_amt,
+            volume: self.volume,
+            room: self.room,
+            time: self.time,
+            diffusion: self.diffusion,
+            chaos: self.chaos,
+            drive: self.drive,
+            comp: self.comp,
+            bits_idx: self.bits_idx,
+        }
+    }
+
+    fn apply(&mut self, p: Preset) {
+        self.wave = Wave::ALL[std::cmp::min(p.wave, Wave::ALL.len() - 1)];
+        self.octave = p.octave;
+        self.attack = p.attack;
+        self.decay = p.decay;
+        self.sustain = p.sustain;
+        self.release = p.release;
+        self.drift = p.drift;
+        self.noise = p.noise;
+        self.cutoff = p.cutoff;
+        self.resonance = p.resonance;
+        self.reverb_amt = p.reverb_amt;
+        self.volume = p.volume;
+        self.room = p.room;
+        self.time = p.time;
+        self.diffusion = p.diffusion;
+        self.chaos = p.chaos;
+        self.drive = p.drive;
+        self.comp = p.comp;
+        self.bits_idx = std::cmp::min(p.bits_idx, BIT_OPTIONS.len() - 1);
+        self.quant.set_value(BIT_OPTIONS[self.bits_idx].1);
+        self.rebuild_reverb(); // room/time/diffusion may have changed
+    }
+
+    fn save_preset(&mut self, slot: usize) {
+        self.presets[slot] = Some(self.capture());
+        save_presets(&self.presets);
+        self.set_toast(format!("✓ saved preset {}", slot + 1));
+    }
+
+    fn load_preset(&mut self, slot: usize) {
+        match self.presets[slot] {
+            Some(p) => {
+                self.apply(p);
+                self.set_toast(format!("→ loaded preset {}", slot + 1));
+            }
+            None => self.set_toast(format!("preset {} empty", slot + 1)),
+        }
+    }
+
+    fn set_toast(&mut self, msg: String) {
+        self.toast = Some(msg);
+        self.toast_until = self.clock.elapsed().as_secs_f32() + 1.6;
+    }
 }
 
 /// Returns true when the app should quit.
@@ -428,6 +628,14 @@ fn handle_key(app: &mut App, k: KeyEvent) -> bool {
             KeyCode::Right => app.wave = app.wave.step(1),
             KeyCode::Char(',') => app.octave = std::cmp::max(app.octave - 1, -3),
             KeyCode::Char('.') => app.octave = std::cmp::min(app.octave + 1, 3),
+            KeyCode::Char(c @ '1'..='9') => {
+                let slot = c as usize - '1' as usize;
+                if ctrl {
+                    app.load_preset(slot);
+                } else {
+                    app.save_preset(slot);
+                }
+            }
             KeyCode::Char(c) => {
                 if let Some(st) = key_to_semitone(c) {
                     if app.supports_release {
@@ -515,7 +723,7 @@ fn key_line(slots: &[(usize, char, bool)], width: usize) -> Line<'static> {
 
 fn ui(f: &mut Frame, app: &App) {
     let area = f.area();
-    let title = Line::from(vec![
+    let mut title_spans = vec![
         Span::styled(
             " ♪ tui-synth ",
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
@@ -524,7 +732,14 @@ fn ui(f: &mut Frame, app: &App) {
             format!("· {} voices ", app.active.len()),
             Style::default().fg(DIM),
         ),
-    ]);
+    ];
+    if let Some(t) = &app.toast {
+        title_spans.push(Span::styled(
+            format!("· {} ", t),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ));
+    }
+    let title = Line::from(title_spans);
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -540,7 +755,7 @@ fn ui(f: &mut Frame, app: &App) {
         .constraints([
             Constraint::Length(1), // [0] waveform + octave
             Constraint::Length(1), // [1] spacer
-            Constraint::Length(8), // [2] envelope curve + parameter columns
+            Constraint::Length(9), // [2] envelope curve + parameter columns
             Constraint::Length(1), // [3] spacer
             Constraint::Length(3), // [4] piano
             Constraint::Min(1),    // [5] footer
@@ -574,6 +789,19 @@ fn ui(f: &mut Frame, app: &App) {
         .alignment(Alignment::Right),
         head[1],
     );
+
+    // --- row 1: preset slots ---
+    let mut preset_spans = vec![Span::styled(" PRESETS ", Style::default().fg(DIM))];
+    for i in 0..9 {
+        let st = if app.presets[i].is_some() {
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(DIM)
+        };
+        preset_spans.push(Span::styled(format!("{} ", i + 1), st));
+    }
+    preset_spans.push(Span::styled("  tap save · Ctrl+# load", Style::default().fg(DIM)));
+    f.render_widget(Paragraph::new(Line::from(preset_spans)), rows[1]);
 
     // --- row 2: envelope curve | osc+filter column | fx column ---
     let mid = Layout::default()
@@ -632,15 +860,17 @@ fn ui(f: &mut Frame, app: &App) {
     ];
     f.render_widget(Paragraph::new(col_a), mid[1]);
 
-    // column B — reverb + output + chaos
+    // column B — saturator + reverb + output + chaos
     let rv = app.reverb_amt;
     let vol = app.volume;
     let col_b = vec![
+        param_row("Drive", format!("{:.0}%", app.drive * 100.0), app.drive, sel(Param::Drive)),
         param_row("Reverb", format!("{:.0}%", rv * 100.0), rv, sel(Param::RevAmount)),
         param_row("Room", format!("{:.0}m", app.room), (app.room - 10.0) / 20.0, sel(Param::RevRoom)),
         param_row("Time", format!("{:.2}s", app.time), app.time / 10.0, sel(Param::RevTime)),
         param_row("Diffuse", format!("{:.0}%", app.diffusion * 100.0), app.diffusion, sel(Param::RevDiffusion)),
         param_row("Volume", format!("{:.0}%", vol * 100.0), vol, sel(Param::Volume)),
+        param_row("Comp", format!("{:.0}%", app.comp * 100.0), app.comp, sel(Param::Comp)),
         param_row(
             "Bits",
             BIT_OPTIONS[app.bits_idx].0.to_string(),
@@ -762,8 +992,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cutoff_sh = shared(8000.0);
     let reso_sh = shared(0.2);
+    let drive_sh = shared(0.0);
     let reverb_sh = shared(0.25);
     let vol_sh = shared(0.5);
+    let comp_sh = shared(1.0);
     let pitch_mod = shared(1.0);
     let quant = shared(0.0); // bit-depth off by default
     let (room, time, diffusion) = (12.0_f32, 2.0_f32, 0.5_f32);
@@ -771,8 +1003,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Box::new(seq_backend),
         &cutoff_sh,
         &reso_sh,
+        &drive_sh,
         &reverb_sh,
         &vol_sh,
+        &comp_sh,
         room,
         time,
         diffusion,
@@ -818,8 +1052,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         reverb_id,
         cutoff_sh,
         reso_sh,
+        drive_sh,
         reverb_sh,
         vol_sh,
+        comp_sh,
         pitch_mod,
         quant,
         bits_idx: 0,
@@ -837,6 +1073,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         release: 0.3,
         drift: 0.3,
         noise: 0.0,
+        drive: 0.0,
+        comp: 0.0,
         chaos: 0.0,
         octave: 0,
         selected: Param::Attack,
@@ -844,6 +1082,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         seed: 0,
         rng: 0x853c_49e6_748f_ea9b,
         clock: Instant::now(),
+        presets: load_presets(),
+        toast: None,
+        toast_until: 0.0,
         supports_release: supports,
     };
 
@@ -852,6 +1093,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         loop {
             let t = app.clock.elapsed().as_secs_f32();
             app.tick_chaos(t);
+            if app.toast.is_some() && t > app.toast_until {
+                app.toast = None;
+            }
             terminal.draw(|f| ui(f, &app))?;
             if event::poll(Duration::from_millis(16))? {
                 if let Event::Key(k) = event::read()? {
