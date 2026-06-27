@@ -1,4 +1,4 @@
-//! tui-synth — a compact polyphonic ADSR synthesizer that plays from the terminal.
+//! zygmunt — a compact polyphonic ADSR synthesizer that plays from the terminal.
 //!
 //! Architecture (the load-bearing boundary):
 //!   UI thread  --(fundsp Sequencer frontend: lock-free)-->  audio thread (cpal callback)
@@ -392,7 +392,7 @@ impl Preset {
 
 fn presets_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".tui-synth-presets.txt")
+    PathBuf::from(home).join(".zygmunt-presets.txt")
 }
 
 fn load_presets() -> [Option<Preset>; 9] {
@@ -811,7 +811,7 @@ fn ui(f: &mut Frame, app: &App) {
     let area = f.area();
     let mut title_spans = vec![
         Span::styled(
-            " ♪ tui-synth ",
+            " ♪ zygmunt ",
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
