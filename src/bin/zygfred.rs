@@ -108,8 +108,14 @@ fn build_drum_stereo(
     haas: f64,
 ) -> Box<dyn AudioUnit> {
     let l = drum_mono(vl, vel, mul_l);
-    let r = drum_mono(vr, vel, mul_r) >> delay(haas as f32);
-    Box::new(l | r)
+    if haas > 0.0005 {
+        let r = drum_mono(vr, vel, mul_r) >> delay(haas as f32);
+        Box::new(l | r)
+    } else {
+        // no Haas: skip the delay node entirely (a 0-length delay is a glitch hazard)
+        let r = drum_mono(vr, vel, mul_r);
+        Box::new(l | r)
+    }
 }
 
 
