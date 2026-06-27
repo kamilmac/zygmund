@@ -10,12 +10,15 @@
 use std::collections::HashMap;
 use std::io::{self, Stdout};
 use std::path::PathBuf;
+use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
 
 use fundsp::prelude64::*;
+
+use midir::{Ignore, MidiInput, MidiInputConnection};
 
 use ratatui::crossterm::{
     event::{
@@ -32,12 +35,8 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
-    symbols::Marker,
     text::{Line, Span},
-    widgets::{
-        canvas::{Canvas, Line as CanvasLine},
-        Block, BorderType, Borders, Paragraph,
-    },
+    widgets::{Block, BorderType, Borders, Paragraph},
     Frame, Terminal,
 };
 
@@ -143,6 +142,33 @@ impl Param {
         let n = Param::ALL.len() as i32;
         Param::ALL[(((i + d) % n + n) % n) as usize]
     }
+    fn name(self) -> &'static str {
+        match self {
+            Param::Attack => "Attack",
+            Param::Decay => "Decay",
+            Param::Sustain => "Sustain",
+            Param::Release => "Release",
+            Param::Drift => "Drift",
+            Param::Detune => "Detune",
+            Param::Noise => "Noise",
+            Param::Hiss => "Hiss",
+            Param::Cutoff => "Cutoff",
+            Param::Resonance => "Reso",
+            Param::FEnv => "F.Env",
+            Param::FDecay => "F.Decay",
+            Param::Drive => "Drive",
+            Param::Delay => "Delay",
+            Param::DFeed => "D.Feed",
+            Param::RevAmount => "Reverb",
+            Param::RevRoom => "Room",
+            Param::RevTime => "Time",
+            Param::RevDiffusion => "Diffuse",
+            Param::Volume => "Volume",
+            Param::Comp => "Comp",
+            Param::Bits => "Bits",
+            Param::Chaos => "Chaos",
+        }
+    }
 }
 
 // ---------- DSP construction ----------
@@ -213,6 +239,7 @@ fn build_voice(
 fn make_voice(
     wave: Wave,
     hz: f32,
+    vel: f32,
     a: f32,
     d: f32,
     s: f32,
@@ -225,7 +252,7 @@ fn make_voice(
 ) -> (Box<dyn AudioUnit>, Shared) {
     let gate = shared(0.0);
     let mut voice =
-        build_voice(wave, hz, VEL, &gate, a, d, s, r, drift, detune, noise_amt, pitch_mod, seed);
+        build_voice(wave, hz, vel, &gate, a, d, s, r, drift, detune, noise_amt, pitch_mod, seed);
     voice.allocate();
     voice.get_mono(); // observe gate<=0 once
     gate.set_value(1.0);
@@ -452,6 +479,103 @@ fn save_presets(presets: &[Option<Preset>; 9]) {
     let _ = std::fs::write(presets_path(), s);
 }
 
+// ---------- MIDI ----------
+
+enum MidiMsg {
+    NoteOn { ch: u8, note: u8, vel: u8 },
+    NoteOff { ch: u8, note: u8 },
+    Cc { ch: u8, cc: u8, value: u8 },
+}
+
+fn parse_midi(bytes: &[u8]) -> Option<MidiMsg> {
+    if bytes.len() < 3 {
+        return None;
+    }
+    let ch = bytes[0] & 0x0F;
+    match bytes[0] & 0xF0 {
+        0x90 => Some(MidiMsg::NoteOn { ch, note: bytes[1], vel: bytes[2] }),
+        0x80 => Some(MidiMsg::NoteOff { ch, note: bytes[1] }),
+        0xB0 => Some(MidiMsg::Cc { ch, cc: bytes[1], value: bytes[2] }),
+        _ => None,
+    }
+}
+
+/// Connect to the first available MIDI input (preferring a Digitakt/Elektron port). The returned
+/// connection must be kept alive to keep receiving. Each message is parsed and sent over `tx`.
+fn setup_midi(tx: Sender<MidiMsg>) -> Option<(MidiInputConnection<()>, String)> {
+    let mut input = MidiInput::new("zygmunt").ok()?;
+    input.ignore(Ignore::None);
+    let ports = input.ports();
+    if ports.is_empty() {
+        return None;
+    }
+    let port = ports
+        .iter()
+        .find(|p| {
+            input
+                .port_name(p)
+                .map(|n| {
+                    let n = n.to_lowercase();
+                    n.contains("digitakt") || n.contains("elektron")
+                })
+                .unwrap_or(false)
+        })
+        .cloned()
+        .unwrap_or_else(|| ports[0].clone());
+    let name = input.port_name(&port).unwrap_or_else(|_| "midi".into());
+    let conn = input
+        .connect(
+            &port,
+            "zygmunt-in",
+            move |_stamp, bytes, _| {
+                if let Some(msg) = parse_midi(bytes) {
+                    let _ = tx.send(msg);
+                }
+            },
+            (),
+        )
+        .ok()?;
+    Some((conn, name))
+}
+
+fn midi_map_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".zygmunt-midi.txt")
+}
+
+fn load_cc_map() -> HashMap<u8, Param> {
+    let mut m = HashMap::new();
+    if let Ok(text) = std::fs::read_to_string(midi_map_path()) {
+        for line in text.lines() {
+            let mut it = line.split(',');
+            if let (Some(cc), Some(idx)) = (it.next(), it.next()) {
+                if let (Ok(cc), Ok(idx)) = (cc.parse::<u8>(), idx.parse::<usize>()) {
+                    if idx < Param::ALL.len() {
+                        m.insert(cc, Param::ALL[idx]);
+                    }
+                }
+            }
+        }
+    }
+    m
+}
+
+fn save_cc_map(m: &HashMap<u8, Param>) {
+    let mut s = String::new();
+    for (cc, p) in m {
+        let idx = Param::ALL.iter().position(|x| x == p).unwrap_or(0);
+        s.push_str(&format!("{},{}\n", cc, idx));
+    }
+    let _ = std::fs::write(midi_map_path(), s);
+}
+
+/// A held note's identity — keyboard notes key by char (survives octave changes), MIDI by note number.
+#[derive(PartialEq, Eq, Hash, Clone, Copy)]
+enum NoteId {
+    Kbd(char),
+    Midi(u8),
+}
+
 // ---------- application state (UI thread) ----------
 struct App {
     sequencer: Sequencer, // frontend; pushing notes is the lock-free bridge to audio
@@ -497,44 +621,49 @@ struct App {
     chaos: f32,   // global instability: continuous wander + per-note variation
     octave: i32,
     selected: Param,
-    active: HashMap<char, (EventId, Shared)>, // held notes -> (sequencer event, gate)
-    seed: u64,                                // per-voice drift seed source
-    rng: u64,                                 // per-note chaos RNG state
-    clock: Instant,                           // for continuous wander
+    active: HashMap<NoteId, (EventId, Shared)>, // held notes -> (sequencer event, gate)
+    seed: u64,                                  // per-voice drift seed source
+    rng: u64,                                   // per-note chaos RNG state
+    clock: Instant,                             // for continuous wander
     presets: [Option<Preset>; 9],
     toast: Option<String>, // transient "saved/loaded preset N" notification
     toast_until: f32,
+    midi_channel: u8, // 0 = Omni, 1..=16
+    midi_port: String,
+    cc_map: HashMap<u8, Param>, // CC number -> bound param (MIDI learn)
+    learn_armed: bool,          // next CC binds to the selected param
+    last_midi: Option<String>,  // last received MIDI message, for the UI
     supports_release: bool,
 }
 
 impl App {
-    fn note_on(&mut self, key: char, semitone: i32) {
-        if self.active.contains_key(&key) {
+    fn start_note(&mut self, id: NoteId, base_hz: f32, vel: f32) {
+        if self.active.contains_key(&id) {
             return;
         }
-        let (hz, a, d, s, r, drift, noise, seed) = self.voice_params(semitone);
+        let (hz, a, d, s, r, drift, noise, seed) = self.voice_params(base_hz);
         let (voice, gate) = make_voice(
-            self.wave, hz, a, d, s, r, drift, self.detune, noise, &self.pitch_mod, seed,
+            self.wave, hz, vel, a, d, s, r, drift, self.detune, noise, &self.pitch_mod, seed,
         );
-        let id = self
+        let evid = self
             .sequencer
             .push_relative(0.0, f64::INFINITY, Fade::Smooth, 0.004, 0.01, voice);
-        self.active.insert(key, (id, gate));
+        self.active.insert(id, (evid, gate));
     }
 
-    fn note_off(&mut self, key: char) {
-        if let Some((id, gate)) = self.active.remove(&key) {
+    fn stop_note(&mut self, id: NoteId) {
+        if let Some((evid, gate)) = self.active.remove(&id) {
             gate.set_value(-1.0); // start the ADSR release
             let tail = self.release as f64 + 0.1;
-            self.sequencer.edit_relative(id, tail, 0.05); // remove voice after the tail
+            self.sequencer.edit_relative(evid, tail, 0.05); // remove voice after the tail
         }
     }
 
     /// Fallback for terminals without key-release reporting: a fixed-length note.
-    fn play_fixed(&mut self, semitone: i32) {
-        let (hz, a, d, s, r, drift, noise, seed) = self.voice_params(semitone);
+    fn play_fixed(&mut self, base_hz: f32, vel: f32) {
+        let (hz, a, d, s, r, drift, noise, seed) = self.voice_params(base_hz);
         let (voice, _gate) = make_voice(
-            self.wave, hz, a, d, s, r, drift, self.detune, noise, &self.pitch_mod, seed,
+            self.wave, hz, vel, a, d, s, r, drift, self.detune, noise, &self.pitch_mod, seed,
         );
         let len = (a + d + 0.4 + r) as f64;
         self.sequencer
@@ -542,9 +671,10 @@ impl App {
     }
 
     /// Per-note voice parameters, with chaos applied as random per-note variation.
+    /// `base_hz` is the note's nominal frequency; chaos detune is applied here.
     /// Returns (hz, attack, decay, sustain, release, drift_amt, noise_amt, seed).
     #[allow(clippy::type_complexity)]
-    fn voice_params(&mut self, semitone: i32) -> (f32, f32, f32, f32, f32, f32, f32, u64) {
+    fn voice_params(&mut self, base_hz: f32) -> (f32, f32, f32, f32, f32, f32, f32, u64) {
         self.last_note = self.clock.elapsed().as_secs_f32(); // retrigger the filter envelope
         let c = self.chaos;
         let a = (self.attack * (1.0 + 0.3 * c * self.rnd())).clamp(0.001, 2.0);
@@ -554,8 +684,95 @@ impl App {
         let drift = (self.drift + 0.3 * c * self.rnd().abs()).clamp(0.0, 1.0) * 0.015;
         let noise = (self.noise + 0.2 * c * self.rnd().abs()).clamp(0.0, 1.0) * 0.5;
         let detune = 1.0 + 0.015 * c * self.rnd(); // up to ~+/-25 cents of broken tuning
-        let hz = midi_hz((60 + semitone + 12 * self.octave) as f32) * detune;
+        let hz = base_hz * detune;
         (hz, a, d, s, r, drift, noise, self.next_seed())
+    }
+
+    /// Apply an incoming MIDI message (channel-filtered): notes, or CC -> param (with learn).
+    fn handle_midi(&mut self, msg: MidiMsg) {
+        let ch_ok = |ch: u8| self.midi_channel == 0 || self.midi_channel == ch + 1;
+        match msg {
+            MidiMsg::NoteOn { ch, note, vel } if ch_ok(ch) => {
+                self.last_midi = Some(format!("note {} v{}", note, vel));
+                if vel == 0 {
+                    self.stop_note(NoteId::Midi(note));
+                } else {
+                    let g = vel as f32 / 127.0 * 0.3; // map velocity to per-voice gain
+                    self.start_note(NoteId::Midi(note), midi_hz(note as f32), g);
+                }
+            }
+            MidiMsg::NoteOff { ch, note } if ch_ok(ch) => {
+                self.last_midi = Some(format!("off {}", note));
+                self.stop_note(NoteId::Midi(note));
+            }
+            MidiMsg::Cc { ch, cc, value } if ch_ok(ch) => {
+                self.last_midi = Some(format!("CC{} {}", cc, value));
+                if self.learn_armed {
+                    self.cc_map.insert(cc, self.selected);
+                    self.learn_armed = false;
+                    save_cc_map(&self.cc_map);
+                    self.set_toast(format!("CC{} → {}", cc, self.selected.name()));
+                } else if let Some(&p) = self.cc_map.get(&cc) {
+                    self.set_param_norm(p, value as f32 / 127.0);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Set a param from a normalised 0..1 value (used by MIDI CC, absolute control).
+    fn set_param_norm(&mut self, p: Param, norm: f32) {
+        let n = norm.clamp(0.0, 1.0);
+        match p {
+            Param::Attack => self.attack = 0.001 + n * 1.999,
+            Param::Decay => self.decay = 0.001 + n * 1.999,
+            Param::Sustain => self.sustain = n,
+            Param::Release => self.release = 0.001 + n * 2.999,
+            Param::Drift => self.drift = n,
+            Param::Detune => self.detune = n,
+            Param::Noise => self.noise = n,
+            Param::Hiss => self.hiss = n,
+            Param::Cutoff => self.cutoff = 20.0 * 1000.0_f32.powf(n), // log 20..20000
+            Param::Resonance => self.resonance = n * 0.98,
+            Param::FEnv => self.fenv = n,
+            Param::FDecay => self.fdecay = 0.02 + n * 1.98,
+            Param::Drive => self.drive = n,
+            Param::Delay => self.delay = n,
+            Param::DFeed => self.dfeed = n * 0.9,
+            Param::RevAmount => self.reverb_amt = n,
+            Param::RevRoom => {
+                let v = 10.0 + n * 20.0;
+                if (v - self.room).abs() > 1.0 {
+                    self.room = v;
+                    self.rebuild_reverb();
+                }
+            }
+            Param::RevTime => {
+                let v = 0.5 + n * 9.5;
+                if (v - self.time).abs() > 0.5 {
+                    self.time = v;
+                    self.rebuild_reverb();
+                }
+            }
+            Param::RevDiffusion => {
+                let v = n;
+                if (v - self.diffusion).abs() > 0.05 {
+                    self.diffusion = v;
+                    self.rebuild_reverb();
+                }
+            }
+            Param::Volume => self.volume = n,
+            Param::Comp => self.comp = n,
+            Param::Bits => {
+                self.bits_idx = (n * (BIT_OPTIONS.len() - 1) as f32).round() as usize;
+                self.quant.set_value(BIT_OPTIONS[self.bits_idx].1);
+            }
+            Param::Chaos => self.chaos = n,
+        }
+    }
+
+    fn cycle_midi_channel(&mut self, d: i32) {
+        self.midi_channel = (self.midi_channel as i32 + d).rem_euclid(17) as u8;
     }
 
     fn adjust(&mut self, d: i32) {
@@ -753,6 +970,14 @@ fn handle_key(app: &mut App, k: KeyEvent) -> bool {
             KeyCode::Right => app.wave = app.wave.step(1),
             KeyCode::Char(',') => app.octave = std::cmp::max(app.octave - 1, -3),
             KeyCode::Char('.') => app.octave = std::cmp::min(app.octave + 1, 3),
+            KeyCode::Char('m') => app.cycle_midi_channel(1),
+            KeyCode::Char('M') => app.cycle_midi_channel(-1),
+            KeyCode::Enter => {
+                app.learn_armed = !app.learn_armed;
+                if app.learn_armed {
+                    app.set_toast(format!("MIDI learn: send a CC for {}", app.selected.name()));
+                }
+            }
             KeyCode::Char(c @ '1'..='9') => {
                 let slot = c as usize - '1' as usize;
                 if ctrl {
@@ -763,10 +988,11 @@ fn handle_key(app: &mut App, k: KeyEvent) -> bool {
             }
             KeyCode::Char(c) => {
                 if let Some(st) = key_to_semitone(c) {
+                    let hz = midi_hz((60 + st + 12 * app.octave) as f32);
                     if app.supports_release {
-                        app.note_on(c, st);
+                        app.start_note(NoteId::Kbd(c), hz, VEL);
                     } else {
-                        app.play_fixed(st);
+                        app.play_fixed(hz, VEL);
                     }
                 }
             }
@@ -780,7 +1006,7 @@ fn handle_key(app: &mut App, k: KeyEvent) -> bool {
         KeyEventKind::Release => {
             if let KeyCode::Char(c) = k.code {
                 if key_to_semitone(c).is_some() {
-                    app.note_off(c);
+                    app.stop_note(NoteId::Kbd(c));
                 }
             }
         }
@@ -814,7 +1040,7 @@ fn param_row(name: &str, value: String, ratio: f32, selected: bool) -> Line<'sta
     let bar_style = Style::default().fg(if selected { ACCENT } else { DIM });
     Line::from(vec![
         Span::styled(format!(" {:<7}", name), label_style),
-        Span::styled(bar(ratio, 9), bar_style),
+        Span::styled(bar(ratio, 16), bar_style),
         Span::styled(format!(" {}", value), val_style),
     ])
 }
@@ -878,12 +1104,13 @@ fn ui(f: &mut Frame, app: &App) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // [0] waveform + octave
-            Constraint::Length(1), // [1] spacer
-            Constraint::Length(12), // [2] envelope curve + parameter columns
-            Constraint::Length(1), // [3] spacer
-            Constraint::Length(3), // [4] piano
-            Constraint::Min(1),    // [5] footer
+            Constraint::Length(1),  // [0] waveform + octave
+            Constraint::Length(1),  // [1] presets
+            Constraint::Length(1),  // [2] MIDI status
+            Constraint::Length(12), // [3] parameter columns
+            Constraint::Length(1),  // [4] spacer
+            Constraint::Length(3),  // [5] piano
+            Constraint::Min(1),     // [6] footer
         ])
         .split(inner);
 
@@ -928,46 +1155,41 @@ fn ui(f: &mut Frame, app: &App) {
     preset_spans.push(Span::styled("  tap save · Ctrl+# load", Style::default().fg(DIM)));
     f.render_widget(Paragraph::new(Line::from(preset_spans)), rows[1]);
 
-    // --- row 2: envelope curve | osc+filter column | fx column ---
+    // --- row 2: MIDI status ---
+    let ch_label = if app.midi_channel == 0 {
+        "Omni".to_string()
+    } else {
+        app.midi_channel.to_string()
+    };
+    let mut midi_spans = vec![
+        Span::styled(" MIDI ", Style::default().fg(DIM)),
+        Span::styled(format!("ch:{ch_label} "), Style::default().fg(IDLE)),
+        Span::styled(format!("· {} ", app.midi_port), Style::default().fg(DIM)),
+    ];
+    if app.learn_armed {
+        midi_spans.push(Span::styled(
+            format!("· ◉ LEARN {} (send a CC) ", app.selected.name()),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ));
+    } else {
+        midi_spans.push(Span::styled(
+            format!("· {} maps ", app.cc_map.len()),
+            Style::default().fg(DIM),
+        ));
+        if let Some(m) = &app.last_midi {
+            midi_spans.push(Span::styled(format!("· {m}"), Style::default().fg(DIM)));
+        }
+    }
+    f.render_widget(Paragraph::new(Line::from(midi_spans)), rows[2]);
+
+    // --- row 3: two parameter columns ---
     let mid = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(28),
-            Constraint::Percentage(38),
-            Constraint::Percentage(34),
-        ])
-        .split(rows[2]);
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(rows[3]);
 
-    // envelope curve
     let (a, d, s, r) = (app.attack, app.decay, app.sustain, app.release);
-    let hold = 0.35f32;
-    let total = (a + d + hold + r).max(0.0001);
-    let x1 = (a / total) as f64;
-    let x2 = ((a + d) / total) as f64;
-    let x3 = ((a + d + hold) / total) as f64;
-    let sy = s as f64;
-    let env = Canvas::default()
-        .block(Block::default().title(Span::styled(" envelope", Style::default().fg(DIM))))
-        .background_color(BG)
-        .marker(Marker::Braille)
-        .x_bounds([0.0, 1.0])
-        .y_bounds([0.0, 1.05])
-        .paint(move |ctx| {
-            let seg = |x1, y1, x2, y2| CanvasLine {
-                x1,
-                y1,
-                x2,
-                y2,
-                color: ACCENT,
-            };
-            ctx.draw(&seg(0.0, 0.0, x1, 1.0)); // attack
-            ctx.draw(&seg(x1, 1.0, x2, sy)); // decay
-            ctx.draw(&seg(x2, sy, x3, sy)); // sustain
-            ctx.draw(&seg(x3, sy, 1.0, 0.0)); // release
-        });
-    f.render_widget(env, mid[0]);
-
-    // column A — envelope + oscillator + filter
+    // column A — oscillator + filter
     let secs = |v: f32| format!("{:.0}ms", v * 1000.0);
     let sel = |p: Param| app.selected == p;
     let cutoff = app.cutoff;
@@ -987,7 +1209,7 @@ fn ui(f: &mut Frame, app: &App) {
         param_row("F.Env", format!("{:.0}%", app.fenv * 100.0), app.fenv, sel(Param::FEnv)),
         param_row("F.Decay", format!("{:.2}s", app.fdecay), app.fdecay / 2.0, sel(Param::FDecay)),
     ];
-    f.render_widget(Paragraph::new(col_a), mid[1]);
+    f.render_widget(Paragraph::new(col_a), mid[0]);
 
     // column B — saturator + reverb + output + chaos
     let rv = app.reverb_amt;
@@ -1010,10 +1232,10 @@ fn ui(f: &mut Frame, app: &App) {
         ),
         param_row("Chaos", format!("{:.0}%", app.chaos * 100.0), app.chaos, sel(Param::Chaos)),
     ];
-    f.render_widget(Paragraph::new(col_b), mid[2]);
+    f.render_widget(Paragraph::new(col_b), mid[1]);
 
     // --- piano ---
-    let act = |c: char| app.active.contains_key(&c);
+    let act = |c: char| app.active.contains_key(&NoteId::Kbd(c));
     let whites = [
         (2usize, 'a', 'C'),
         (6, 's', 'D'),
@@ -1036,21 +1258,21 @@ fn ui(f: &mut Frame, app: &App) {
             Constraint::Length(1),
             Constraint::Length(1),
         ])
-        .split(rows[4]);
+        .split(rows[5]);
     f.render_widget(Paragraph::new(key_line(&black_slots, width)), piano[0]);
     f.render_widget(Paragraph::new(key_line(&white_slots, width)), piano[1]);
     f.render_widget(Paragraph::new(key_line(&note_slots, width)), piano[2]);
 
     // --- footer ---
     let mut hint = String::from(
-        "notes a–k  ·  Tab param  ·  ↑↓ adjust  ·  ←→ wave  ·  , . octave  ·  Esc quit",
+        "Tab param · ↑↓ adjust · ←→ wave · ,. octave · m MIDI ch · Enter learn · 1-9 preset · Esc quit",
     );
     if !app.supports_release {
-        hint.push_str("   (no key-release: fixed-length notes)");
+        hint.push_str("  (no key-release)");
     }
     f.render_widget(
         Paragraph::new(Span::styled(hint, Style::default().fg(DIM))).alignment(Alignment::Center),
-        rows[5],
+        rows[6],
     );
 }
 
@@ -1159,6 +1381,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     stream.play()?;
 
+    // --- MIDI input (kept alive for the program's lifetime) ---
+    let (midi_tx, midi_rx) = std::sync::mpsc::channel::<MidiMsg>();
+    let _midi_conn = setup_midi(midi_tx);
+    let midi_port = _midi_conn
+        .as_ref()
+        .map(|(_, name)| name.clone())
+        .unwrap_or_else(|| "no device".into());
+
     // --- terminal setup (Kitty keyboard protocol for true note-off) ---
     let supports = supports_keyboard_enhancement().unwrap_or(false);
     enable_raw_mode()?;
@@ -1232,19 +1462,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         presets: load_presets(),
         toast: None,
         toast_until: 0.0,
+        midi_channel: 0,
+        midi_port,
+        cc_map: load_cc_map(),
+        learn_armed: false,
+        last_midi: None,
         supports_release: supports,
     };
 
     // --- event loop ---
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        let mut last_draw = -1.0f32;
         loop {
+            // drain MIDI promptly (low note latency); apply on the UI thread
+            while let Ok(msg) = midi_rx.try_recv() {
+                app.handle_midi(msg);
+            }
             let t = app.clock.elapsed().as_secs_f32();
             app.tick_chaos(t);
             if app.toast.is_some() && t > app.toast_until {
                 app.toast = None;
             }
-            terminal.draw(|f| ui(f, &app))?;
-            if event::poll(Duration::from_millis(16))? {
+            if t - last_draw >= 0.033 {
+                terminal.draw(|f| ui(f, &app))?;
+                last_draw = t;
+            }
+            if event::poll(Duration::from_millis(3))? {
                 if let Event::Key(k) = event::read()? {
                     if handle_key(&mut app, k) {
                         break;
