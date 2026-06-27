@@ -32,8 +32,12 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
+    symbols::Marker,
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Paragraph},
+    widgets::{
+        canvas::{Canvas, Line as CanvasLine},
+        Block, BorderType, Borders, Paragraph,
+    },
     Frame as RFrame, Terminal,
 };
 
@@ -94,6 +98,33 @@ fn build_drum(d: DrumParams, vel: f32) -> Box<dyn AudioUnit> {
 
 fn drum_length(d: &DrumParams) -> f64 {
     (0.08 + 1.8 * d.p[6]) as f64
+}
+
+const SCOPE_N: usize = 64;
+
+/// Render the dry voice offline and capture a short waveform window (peak-per-bin) for the scope.
+fn capture_scope(p: DrumParams, sr: f32) -> [f32; SCOPE_N] {
+    let mut v = build_drum(p, 0.95);
+    v.set_sample_rate(sr as f64);
+    v.allocate();
+    let window = (0.05 * sr) as usize; // ~50 ms
+    let step = std::cmp::max(window / SCOPE_N, 1);
+    let mut out = [0.0f32; SCOPE_N];
+    let (mut oi, mut peak, mut cnt) = (0usize, 0.0f32, 0usize);
+    for _ in 0..window {
+        let s = v.get_mono();
+        if s.abs() > peak.abs() {
+            peak = s;
+        }
+        cnt += 1;
+        if cnt >= step && oi < SCOPE_N {
+            out[oi] = peak;
+            oi += 1;
+            peak = 0.0;
+            cnt = 0;
+        }
+    }
+    out
 }
 
 fn drum_for_semitone(st: i32) -> Option<usize> {
@@ -258,8 +289,10 @@ struct App {
     quant: Shared,
     bits_idx: usize,
     drums: [DrumParams; 3],
+    scope: [[f32; SCOPE_N]; 3], // last-hit waveform per voice
+    sr: f32,
     sel_drum: usize,
-    sel_row: usize, // 0..NROWS (0..9 drum params, 9..12 master)
+    sel_row: usize, // 0..NROWS (0..9 drum params, then master)
     flash: [f32; 3],
     cc_map: HashMap<u8, usize>,
     learn: bool,
@@ -333,6 +366,7 @@ impl App {
         let voice = build_drum(p, vel);
         let len = drum_length(&p);
         self.sequencer.push_relative(0.0, len, Fade::Smooth, 0.001, 0.02, voice);
+        self.scope[drum] = capture_scope(p, self.sr); // refresh the on-screen waveform
     }
 
     fn set_toast(&mut self, m: String) {
@@ -461,7 +495,7 @@ fn select_id(app: &mut App, id: usize) {
 
 // ---------- rendering ----------
 
-fn cell_bar(ratio: f32, width: usize) -> String {
+fn bar(ratio: f32, width: usize) -> String {
     let filled = (ratio.clamp(0.0, 1.0) * width as f32).round() as usize;
     let mut s = String::with_capacity(width);
     for _ in 0..filled {
@@ -473,13 +507,96 @@ fn cell_bar(ratio: f32, width: usize) -> String {
     s
 }
 
+fn param_line(app: &App, drum: usize, pi: usize, active: bool) -> Line<'static> {
+    let val = app.drums[drum].p[pi];
+    let sel = drum == app.sel_drum && app.sel_row == pi;
+    let st = if sel {
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(if active { IDLE } else { DIM })
+    };
+    Line::from(vec![
+        Span::styled(format!("{:<6}", PARAMS[pi]), st),
+        Span::raw(" "),
+        Span::styled(bar(val, 8), Style::default().fg(if sel { ACCENT } else { DIM })),
+        Span::styled(format!(" {:.0}%", val * 100.0), st),
+    ])
+}
+
+fn render_cell(f: &mut RFrame, area: Rect, app: &App, drum: usize, hits: &mut Hits) {
+    let now = app.clock.elapsed().as_secs_f32();
+    let hit = now - app.flash[drum] < 0.12;
+    let active = drum == app.sel_drum;
+    let border = if hit {
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+    } else if active {
+        Style::default().fg(ACCENT)
+    } else {
+        Style::default().fg(DIM)
+    };
+    let title_st = if active {
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(IDLE)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(border)
+        .title(Span::styled(format!(" {} ({}) ", DRUMS[drum], ['C', 'D', 'E'][drum]), title_st));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let parts = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(4), Constraint::Length(3), Constraint::Min(0)])
+        .split(inner);
+
+    // top params 0..4
+    let mut top = Vec::new();
+    for pi in 0..4 {
+        top.push(param_line(app, drum, pi, active));
+        hits.cells.push((drum * NP + pi, Rect::new(inner.x + 7, parts[0].y + pi as u16, 8, 1)));
+    }
+    f.render_widget(Paragraph::new(top), parts[0]);
+
+    // scope (braille waveform of last hit)
+    let pts = app.scope[drum];
+    let scope_col = if active { ACCENT } else { Color::Rgb(120, 105, 85) };
+    let scope = Canvas::default()
+        .background_color(BG)
+        .marker(Marker::Braille)
+        .x_bounds([0.0, (SCOPE_N - 1) as f64])
+        .y_bounds([-1.05, 1.05])
+        .paint(move |ctx| {
+            for i in 1..SCOPE_N {
+                ctx.draw(&CanvasLine {
+                    x1: (i - 1) as f64,
+                    y1: pts[i - 1] as f64,
+                    x2: i as f64,
+                    y2: pts[i] as f64,
+                    color: scope_col,
+                });
+            }
+        });
+    f.render_widget(scope, parts[1]);
+
+    // bottom params 4..9
+    let mut bot = Vec::new();
+    for pi in 4..NP {
+        bot.push(param_line(app, drum, pi, active));
+        hits.cells.push((drum * NP + pi, Rect::new(inner.x + 7, parts[2].y + (pi - 4) as u16, 8, 1)));
+    }
+    f.render_widget(Paragraph::new(bot), parts[2]);
+}
+
 fn ui(f: &mut RFrame, app: &App) {
     let area = f.area();
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(DIM))
-        .title(Span::styled(" ◆ zygdrum · FM drums ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(" \u{25c6} zygdrum \u{b7} FM drums ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)))
         .title_alignment(Alignment::Center)
         .style(Style::default().bg(BG));
     let inner = outer.inner(area);
@@ -488,70 +605,29 @@ fn ui(f: &mut RFrame, app: &App) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),  // [0] column headers
-            Constraint::Length(NP as u16), // [1] matrix
-            Constraint::Length(1),  // [2] separator
-            Constraint::Length(NMASTER as u16), // [3] master
-            Constraint::Length(1),  // [4] midi/learn
-            Constraint::Length(1),  // [5] separator
-            Constraint::Min(1),     // [6] footer
+            Constraint::Min(0),    // [0] voice cells
+            Constraint::Length(1), // [1] master strip
+            Constraint::Length(1), // [2] midi/learn
+            Constraint::Length(1), // [3] footer
         ])
         .split(inner);
 
-    let label_w: u16 = 8;
-    let bar_w: u16 = 14;
-    let col_gap: u16 = 2;
-    let now = app.clock.elapsed().as_secs_f32();
+    let cells = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Ratio(1, 3), Constraint::Ratio(1, 3), Constraint::Ratio(1, 3)])
+        .split(rows[0]);
 
-    // column headers
-    let mut hd: Vec<Span> = vec![Span::styled(format!("{:<width$}", "", width = label_w as usize), Style::default())];
-    for (i, name) in DRUMS.iter().enumerate() {
-        let hit = now - app.flash[i] < 0.12;
-        let st = if i == app.sel_drum {
-            Style::default().fg(BG).bg(ACCENT).add_modifier(Modifier::BOLD)
-        } else if hit {
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(IDLE)
-        };
-        hd.push(Span::styled(format!("{:^width$}", format!("{} ({})", name, ['C','D','E'][i]), width = bar_w as usize), st));
-        hd.push(Span::raw(" ".repeat(col_gap as usize)));
-    }
-    f.render_widget(Paragraph::new(Line::from(hd)), rows[0]);
-
-    // matrix: param rows x drum columns
     let mut hits = app.hits.borrow_mut();
     hits.cells.clear();
-    let mut lines: Vec<Line> = Vec::with_capacity(NP);
-    for (pi, pname) in PARAMS.iter().enumerate() {
-        let row_sel = app.sel_row == pi;
-        let mut spans: Vec<Span> = vec![Span::styled(
-            format!("{:<width$}", pname, width = label_w as usize),
-            if row_sel { Style::default().fg(ACCENT).add_modifier(Modifier::BOLD) } else { Style::default().fg(IDLE) },
-        )];
-        for drum in 0..3 {
-            let id = drum * NP + pi;
-            let sel = drum == app.sel_drum && row_sel;
-            let val = app.drums[drum].p[pi];
-            let style = if sel {
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(if drum == app.sel_drum { IDLE } else { DIM })
-            };
-            spans.push(Span::styled(cell_bar(val, bar_w as usize), style));
-            spans.push(Span::raw(" ".repeat(col_gap as usize)));
-            let x = rows[1].x + label_w + (drum as u16) * (bar_w + col_gap);
-            hits.cells.push((id, Rect::new(x, rows[1].y + pi as u16, bar_w, 1)));
-        }
-        lines.push(Line::from(spans));
+    for drum in 0..3 {
+        render_cell(f, cells[drum], app, drum, &mut hits);
     }
-    f.render_widget(Paragraph::new(lines), rows[1]);
 
-    f.render_widget(Block::default().borders(Borders::TOP).border_style(Style::default().fg(DIM)), rows[2]);
-
-    // master params (rows NP..NP+3)
-    let mut mlines: Vec<Line> = Vec::new();
-    for (mi, mname) in MASTER.iter().enumerate() {
+    // master strip
+    let mut ms: Vec<Span> = vec![Span::styled(" MASTER  ", Style::default().fg(DIM))];
+    let base_x = rows[1].x + 9;
+    let slot: u16 = 20;
+    for mi in 0..NMASTER {
         let id = 27 + mi;
         let sel = app.sel_row == NP + mi;
         let (valstr, ratio) = if mi == 3 {
@@ -560,41 +636,36 @@ fn ui(f: &mut RFrame, app: &App) {
             let v = app.control_norm(id);
             (format!("{:.0}%", v * 100.0), v)
         };
-        let style = if sel { Style::default().fg(ACCENT).add_modifier(Modifier::BOLD) } else { Style::default().fg(IDLE) };
-        mlines.push(Line::from(vec![
-            Span::styled(format!("{:<width$}", mname, width = label_w as usize), style),
-            Span::styled(cell_bar(ratio, bar_w as usize), if sel { Style::default().fg(ACCENT) } else { Style::default().fg(DIM) }),
-            Span::styled(format!(" {valstr}"), style),
-        ]));
-        let x = rows[3].x + label_w;
-        hits.cells.push((id, Rect::new(x, rows[3].y + mi as u16, bar_w, 1)));
+        let st = if sel { Style::default().fg(ACCENT).add_modifier(Modifier::BOLD) } else { Style::default().fg(IDLE) };
+        ms.push(Span::styled(format!("{:<6} ", MASTER[mi]), st));
+        ms.push(Span::styled(bar(ratio, 8), Style::default().fg(if sel { ACCENT } else { DIM })));
+        ms.push(Span::styled(format!(" {:<5}", valstr), st));
+        hits.cells.push((id, Rect::new(base_x + mi as u16 * slot + 7, rows[1].y, 8, 1)));
     }
     drop(hits);
-    f.render_widget(Paragraph::new(mlines), rows[3]);
+    f.render_widget(Paragraph::new(Line::from(ms)), rows[1]);
 
     // midi / learn line
     let ch = if app.midi_channel == 0 { "Omni".to_string() } else { app.midi_channel.to_string() };
     let mut ml: Vec<Span> = vec![
         Span::styled(" MIDI ", Style::default().fg(DIM)),
         Span::styled(format!("ch:{ch} "), Style::default().fg(IDLE)),
-        Span::styled(format!("· {} ", app.midi_port), Style::default().fg(DIM)),
+        Span::styled(format!("\u{b7} {} ", app.midi_port), Style::default().fg(DIM)),
     ];
     if app.learn {
-        ml.push(Span::styled(format!("· ◉ LEARN {} (send CC) ", control_name(app.cur_id())), Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)));
+        ml.push(Span::styled(format!("\u{b7} \u{25c9} LEARN {} (send CC) ", control_name(app.cur_id())), Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)));
     } else if let Some(t) = &app.toast {
-        ml.push(Span::styled(format!("· {t} "), Style::default().fg(ACCENT)));
+        ml.push(Span::styled(format!("\u{b7} {t} "), Style::default().fg(ACCENT)));
     } else {
-        ml.push(Span::styled(format!("· {} CC maps ", app.cc_map.len()), Style::default().fg(DIM)));
+        ml.push(Span::styled(format!("\u{b7} {} CC maps ", app.cc_map.len()), Style::default().fg(DIM)));
         if let Some(m) = &app.last_midi {
-            ml.push(Span::styled(format!("· {m}"), Style::default().fg(DIM)));
+            ml.push(Span::styled(format!("\u{b7} {m}"), Style::default().fg(DIM)));
         }
     }
-    f.render_widget(Paragraph::new(Line::from(ml)), rows[4]);
+    f.render_widget(Paragraph::new(Line::from(ml)), rows[2]);
 
-    f.render_widget(Block::default().borders(Borders::TOP).border_style(Style::default().fg(DIM)), rows[5]);
-
-    let hint = "a/s/d (C/D/E) trigger · ←→ drum · Tab/↑↓ row · -/= or drag/scroll adjust · Enter learn · m MIDI · Esc quit";
-    f.render_widget(Paragraph::new(Span::styled(hint, Style::default().fg(DIM))).alignment(Alignment::Center), rows[6]);
+    let hint = "a/s/d (C/D/E) trigger \u{b7} \u{2190}\u{2192} drum \u{b7} Tab/\u{2191}\u{2193} param \u{b7} -/= or drag/scroll adjust \u{b7} Enter learn \u{b7} m MIDI \u{b7} Esc quit";
+    f.render_widget(Paragraph::new(Span::styled(hint, Style::default().fg(DIM))).alignment(Alignment::Center), rows[3]);
 }
 
 // ---------- audio plumbing ----------
@@ -702,6 +773,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         quant,
         bits_idx: 0,
         drums,
+        scope: [[0.0; SCOPE_N]; 3],
+        sr: sample_rate as f32,
         sel_drum: 0,
         sel_row: 0,
         flash: [-1.0; 3],
