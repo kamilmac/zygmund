@@ -2153,7 +2153,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "zygmunt"
+name = "zygmund"
 version = "0.1.0"
 dependencies = [
  "cpal",

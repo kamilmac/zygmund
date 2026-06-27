@@ -1,7 +1,8 @@
 [package]
-name = "zygmunt"
+name = "zygmund"
 version = "0.1.0"
 edition = "2021"
+default-run = "zygmunt"
 
 [dependencies]
 fundsp = "0.23"
