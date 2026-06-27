@@ -7,6 +7,7 @@
 //! Each note is a fresh voice that bakes the *current* ADSR; live knobs (reverb, volume)
 //! ride atomic `Shared` values the audio graph reads each block.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{self, Stdout};
 use std::path::PathBuf;
@@ -22,7 +23,8 @@ use midir::{Ignore, MidiInput, MidiInputConnection};
 
 use ratatui::crossterm::{
     event::{
-        self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind,
         PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
@@ -33,7 +35,7 @@ use ratatui::crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
@@ -589,6 +591,13 @@ enum NoteId {
     Midi(u8),
 }
 
+/// Clickable regions captured during render, used by the mouse handler.
+#[derive(Default)]
+struct Hits {
+    params: Vec<(Param, Rect)>, // each slider row's rect
+    presets: Option<Rect>,      // the presets line
+}
+
 // ---------- application state (UI thread) ----------
 struct App {
     sequencer: Sequencer, // frontend; pushing notes is the lock-free bridge to audio
@@ -649,6 +658,7 @@ struct App {
     cc_map: HashMap<u8, Param>, // CC number -> bound param (MIDI learn)
     learn_armed: bool,          // next CC binds to the selected param
     last_midi: Option<String>,  // last received MIDI message, for the UI
+    hits: RefCell<Hits>,        // mouse hit-test regions, refreshed each render
     supports_release: bool,
 }
 
@@ -1046,6 +1056,62 @@ fn handle_key(app: &mut App, k: KeyEvent) -> bool {
     false
 }
 
+/// Find the slider row under the cursor (from the last render's hit regions).
+fn param_at(app: &App, col: u16, row: u16) -> Option<(Param, Rect)> {
+    app.hits
+        .borrow()
+        .params
+        .iter()
+        .find(|(_, r)| col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height)
+        .copied()
+}
+
+/// Find the preset slot under the cursor on the presets line.
+fn preset_at(app: &App, col: u16, row: u16) -> Option<usize> {
+    let r = app.hits.borrow().presets?;
+    if row != r.y {
+        return None;
+    }
+    let start = r.x + 9; // " PRESETS " is 9 columns
+    if col < start {
+        return None;
+    }
+    let idx = ((col - start) / 2) as usize; // each slot is "N " = 2 columns
+    (idx < 9).then_some(idx)
+}
+
+fn handle_mouse(app: &mut App, me: MouseEvent) {
+    let (col, row) = (me.column, me.row);
+    match me.kind {
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+            let d = if matches!(me.kind, MouseEventKind::ScrollUp) {
+                1
+            } else {
+                -1
+            };
+            if let Some((p, _)) = param_at(app, col, row) {
+                app.selected = p; // scroll over a slider targets it
+            }
+            app.adjust(d);
+        }
+        MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left) => {
+            if let Some(slot) = preset_at(app, col, row) {
+                if matches!(me.kind, MouseEventKind::Down(_)) {
+                    app.load_preset(slot); // click a preset = load (hold-on-keyboard still saves)
+                }
+            } else if let Some((p, r)) = param_at(app, col, row) {
+                app.selected = p;
+                let bar_x = r.x + 8; // 8-column label, then a 16-wide bar
+                if col >= bar_x {
+                    let norm = (col - bar_x) as f32 / 16.0;
+                    app.set_param_norm(p, norm.clamp(0.0, 1.0)); // absolute slider set
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 // ---------- rendering ----------
 
 fn bar(ratio: f32, width: usize) -> String {
@@ -1139,12 +1205,22 @@ fn ui(f: &mut Frame, app: &App) {
             Constraint::Length(1),  // [0] waveform + octave
             Constraint::Length(1),  // [1] presets
             Constraint::Length(1),  // [2] MIDI status
-            Constraint::Length(12), // [3] parameter columns
-            Constraint::Length(1),  // [4] spacer
-            Constraint::Length(3),  // [5] piano
-            Constraint::Min(1),     // [6] footer
+            Constraint::Length(1),  // [3] separator
+            Constraint::Length(12), // [4] parameter columns
+            Constraint::Length(1),  // [5] separator
+            Constraint::Length(3),  // [6] piano
+            Constraint::Min(1),     // [7] footer
         ])
         .split(inner);
+
+    // horizontal separators between zones
+    let rule = || {
+        Block::default()
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(DIM))
+    };
+    f.render_widget(rule(), rows[3]);
+    f.render_widget(rule(), rows[5]);
 
     // --- row 0: waveform selector + octave ---
     let head = Layout::default()
@@ -1223,11 +1299,20 @@ fn ui(f: &mut Frame, app: &App) {
     }
     f.render_widget(Paragraph::new(Line::from(midi_spans)), rows[2]);
 
-    // --- row 3: two parameter columns ---
+    // --- two parameter columns with a vertical divider ---
     let mid = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(rows[3]);
+        .constraints([
+            Constraint::Percentage(48),
+            Constraint::Length(3),
+            Constraint::Percentage(49),
+        ])
+        .split(rows[4]);
+    // vertical divider between the columns
+    let divider: Vec<Line> = (0..mid[1].height)
+        .map(|_| Line::from(Span::styled(" │", Style::default().fg(DIM))))
+        .collect();
+    f.render_widget(Paragraph::new(divider), mid[1]);
 
     let (a, d, s, r) = (app.attack, app.decay, app.sustain, app.release);
     // column A — oscillator + filter
@@ -1274,7 +1359,29 @@ fn ui(f: &mut Frame, app: &App) {
         ),
         param_row("Chaos", format!("{:.0}%", app.chaos * 100.0), app.chaos, sel(Param::Chaos)),
     ];
-    f.render_widget(Paragraph::new(col_b), mid[1]);
+    f.render_widget(Paragraph::new(col_b), mid[2]);
+
+    // record clickable slider rows for the mouse handler (must match the render order above)
+    let col_a_params = [
+        Param::Attack, Param::Decay, Param::Sustain, Param::Release, Param::Drift, Param::Detune,
+        Param::Noise, Param::Hiss, Param::Cutoff, Param::Resonance, Param::FEnv, Param::FDecay,
+    ];
+    let col_b_params = [
+        Param::Drive, Param::Delay, Param::DFeed, Param::RevAmount, Param::RevRoom, Param::RevTime,
+        Param::RevDiffusion, Param::Eq1k, Param::Volume, Param::Comp, Param::Bits, Param::Chaos,
+    ];
+    let mut hits = app.hits.borrow_mut();
+    hits.params.clear();
+    for (col, area) in [(&col_a_params[..], mid[0]), (&col_b_params[..], mid[2])] {
+        for (i, &p) in col.iter().enumerate() {
+            hits.params.push((
+                p,
+                Rect::new(area.x, area.y + i as u16, area.width, 1),
+            ));
+        }
+    }
+    hits.presets = Some(rows[1]);
+    drop(hits);
 
     // --- piano ---
     let act = |c: char| app.active.contains_key(&NoteId::Kbd(c));
@@ -1300,21 +1407,21 @@ fn ui(f: &mut Frame, app: &App) {
             Constraint::Length(1),
             Constraint::Length(1),
         ])
-        .split(rows[5]);
+        .split(rows[6]);
     f.render_widget(Paragraph::new(key_line(&black_slots, width)), piano[0]);
     f.render_widget(Paragraph::new(key_line(&white_slots, width)), piano[1]);
     f.render_widget(Paragraph::new(key_line(&note_slots, width)), piano[2]);
 
     // --- footer ---
     let mut hint = String::from(
-        "Tab param · ↑↓ adjust · ←→ wave · ,. octave · m MIDI · Enter learn · 1-9 tap=load/hold=save · Esc quit",
+        "Tab/click param · ↑↓/scroll adjust · drag slider · ←→ wave · ,. octave · m MIDI · Enter learn · 1-9 tap=load/hold=save · Esc quit",
     );
     if !app.supports_release {
         hint.push_str("  (no key-release)");
     }
     f.render_widget(
         Paragraph::new(Span::styled(hint, Style::default().fg(DIM))).alignment(Alignment::Center),
-        rows[6],
+        rows[7],
     );
 }
 
@@ -1366,6 +1473,7 @@ fn restore_terminal(supports: bool) {
     if supports {
         let _ = execute!(out, PopKeyboardEnhancementFlags);
     }
+    let _ = execute!(out, DisableMouseCapture);
     let _ = execute!(out, LeaveAlternateScreen);
     let _ = disable_raw_mode();
 }
@@ -1437,7 +1545,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let supports = supports_keyboard_enhancement().unwrap_or(false);
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     if supports {
         execute!(
             stdout,
@@ -1514,6 +1622,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cc_map: load_cc_map(),
         learn_armed: false,
         last_midi: None,
+        hits: RefCell::new(Hits::default()),
         supports_release: supports,
     };
 
@@ -1542,10 +1651,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 last_draw = t;
             }
             if event::poll(Duration::from_millis(3))? {
-                if let Event::Key(k) = event::read()? {
-                    if handle_key(&mut app, k) {
-                        break;
+                match event::read()? {
+                    Event::Key(k) => {
+                        if handle_key(&mut app, k) {
+                            break;
+                        }
                     }
+                    Event::Mouse(me) => handle_mouse(&mut app, me),
+                    _ => {}
                 }
             }
         }
