@@ -1206,9 +1206,9 @@ fn ui(f: &mut Frame, app: &App) {
             Constraint::Length(1),  // [1] presets
             Constraint::Length(1),  // [2] MIDI status
             Constraint::Length(1),  // [3] separator
-            Constraint::Length(12), // [4] parameter columns
+            Constraint::Length(14), // [4] parameter columns (with section gaps)
             Constraint::Length(1),  // [5] separator
-            Constraint::Length(3),  // [6] piano
+            Constraint::Length(2),  // [6] piano
             Constraint::Min(1),     // [7] footer
         ])
         .split(inner);
@@ -1321,64 +1321,66 @@ fn ui(f: &mut Frame, app: &App) {
     let cutoff = app.cutoff;
     let res = app.resonance;
     let cutoff_ratio = (cutoff.max(20.0).ln() - 20f32.ln()) / (20000f32.ln() - 20f32.ln());
+    let pr = |name: &'static str, value: String, ratio: f32, p: Param| {
+        (Some(p), param_row(name, value, ratio, sel(p)))
+    };
+    let gap = || (None, Line::default());
+    // sections separated by blank lines: envelope · oscillator · filter
     let col_a = vec![
-        param_row("Attack", secs(a), a / 2.0, sel(Param::Attack)),
-        param_row("Decay", secs(d), d / 2.0, sel(Param::Decay)),
-        param_row("Sustain", format!("{:.0}%", s * 100.0), s, sel(Param::Sustain)),
-        param_row("Release", secs(r), r / 3.0, sel(Param::Release)),
-        param_row("Drift", format!("{:.0}%", app.drift * 100.0), app.drift, sel(Param::Drift)),
-        param_row("Detune", format!("{:.0}%", app.detune * 100.0), app.detune, sel(Param::Detune)),
-        param_row("Noise", format!("{:.0}%", app.noise * 100.0), app.noise, sel(Param::Noise)),
-        param_row("Hiss", format!("{:.0}%", app.hiss * 100.0), app.hiss, sel(Param::Hiss)),
-        param_row("Cutoff", format!("{:.0}Hz", cutoff), cutoff_ratio, sel(Param::Cutoff)),
-        param_row("Reso", format!("{:.0}%", res / 0.98 * 100.0), res / 0.98, sel(Param::Resonance)),
-        param_row("F.Env", format!("{:.0}%", app.fenv * 100.0), app.fenv, sel(Param::FEnv)),
-        param_row("F.Decay", format!("{:.2}s", app.fdecay), app.fdecay / 2.0, sel(Param::FDecay)),
+        pr("Attack", secs(a), a / 2.0, Param::Attack),
+        pr("Decay", secs(d), d / 2.0, Param::Decay),
+        pr("Sustain", format!("{:.0}%", s * 100.0), s, Param::Sustain),
+        pr("Release", secs(r), r / 3.0, Param::Release),
+        gap(),
+        pr("Drift", format!("{:.0}%", app.drift * 100.0), app.drift, Param::Drift),
+        pr("Detune", format!("{:.0}%", app.detune * 100.0), app.detune, Param::Detune),
+        pr("Noise", format!("{:.0}%", app.noise * 100.0), app.noise, Param::Noise),
+        pr("Hiss", format!("{:.0}%", app.hiss * 100.0), app.hiss, Param::Hiss),
+        gap(),
+        pr("Cutoff", format!("{:.0}Hz", cutoff), cutoff_ratio, Param::Cutoff),
+        pr("Reso", format!("{:.0}%", res / 0.98 * 100.0), res / 0.98, Param::Resonance),
+        pr("F.Env", format!("{:.0}%", app.fenv * 100.0), app.fenv, Param::FEnv),
+        pr("F.Decay", format!("{:.2}s", app.fdecay), app.fdecay / 2.0, Param::FDecay),
     ];
-    f.render_widget(Paragraph::new(col_a), mid[0]);
 
-    // column B — saturator + reverb + output + chaos
+    // column B sections: drive/delay · reverb · output
     let rv = app.reverb_amt;
     let vol = app.volume;
     let col_b = vec![
-        param_row("Drive", format!("{:.0}%", app.drive * 100.0), app.drive, sel(Param::Drive)),
-        param_row("Delay", format!("{:.0}%", app.delay * 100.0), app.delay, sel(Param::Delay)),
-        param_row("D.Feed", format!("{:.0}%", app.dfeed / 0.9 * 100.0), app.dfeed / 0.9, sel(Param::DFeed)),
-        param_row("Reverb", format!("{:.0}%", rv * 100.0), rv, sel(Param::RevAmount)),
-        param_row("Room", format!("{:.0}m", app.room), (app.room - 10.0) / 20.0, sel(Param::RevRoom)),
-        param_row("Time", format!("{:.2}s", app.time), app.time / 10.0, sel(Param::RevTime)),
-        param_row("Diffuse", format!("{:.0}%", app.diffusion * 100.0), app.diffusion, sel(Param::RevDiffusion)),
-        param_row("EQ 1k", format!("{:.0}%", app.eq1k * 100.0), app.eq1k, sel(Param::Eq1k)),
-        param_row("Volume", format!("{:.0}%", vol * 100.0), vol, sel(Param::Volume)),
-        param_row("Comp", format!("{:.0}%", app.comp * 100.0), app.comp, sel(Param::Comp)),
-        param_row(
+        pr("Drive", format!("{:.0}%", app.drive * 100.0), app.drive, Param::Drive),
+        pr("Delay", format!("{:.0}%", app.delay * 100.0), app.delay, Param::Delay),
+        pr("D.Feed", format!("{:.0}%", app.dfeed / 0.9 * 100.0), app.dfeed / 0.9, Param::DFeed),
+        gap(),
+        pr("Reverb", format!("{:.0}%", rv * 100.0), rv, Param::RevAmount),
+        pr("Room", format!("{:.0}m", app.room), (app.room - 10.0) / 20.0, Param::RevRoom),
+        pr("Time", format!("{:.2}s", app.time), app.time / 10.0, Param::RevTime),
+        pr("Diffuse", format!("{:.0}%", app.diffusion * 100.0), app.diffusion, Param::RevDiffusion),
+        gap(),
+        pr("EQ 1k", format!("{:.0}%", app.eq1k * 100.0), app.eq1k, Param::Eq1k),
+        pr("Volume", format!("{:.0}%", vol * 100.0), vol, Param::Volume),
+        pr("Comp", format!("{:.0}%", app.comp * 100.0), app.comp, Param::Comp),
+        pr(
             "Bits",
             BIT_OPTIONS[app.bits_idx].0.to_string(),
             app.bits_idx as f32 / (BIT_OPTIONS.len() - 1) as f32,
-            sel(Param::Bits),
+            Param::Bits,
         ),
-        param_row("Chaos", format!("{:.0}%", app.chaos * 100.0), app.chaos, sel(Param::Chaos)),
+        pr("Chaos", format!("{:.0}%", app.chaos * 100.0), app.chaos, Param::Chaos),
     ];
-    f.render_widget(Paragraph::new(col_b), mid[2]);
 
-    // record clickable slider rows for the mouse handler (must match the render order above)
-    let col_a_params = [
-        Param::Attack, Param::Decay, Param::Sustain, Param::Release, Param::Drift, Param::Detune,
-        Param::Noise, Param::Hiss, Param::Cutoff, Param::Resonance, Param::FEnv, Param::FDecay,
-    ];
-    let col_b_params = [
-        Param::Drive, Param::Delay, Param::DFeed, Param::RevAmount, Param::RevRoom, Param::RevTime,
-        Param::RevDiffusion, Param::Eq1k, Param::Volume, Param::Comp, Param::Bits, Param::Chaos,
-    ];
+    // render each column and record clickable slider rows (gaps are skipped for hit-testing)
     let mut hits = app.hits.borrow_mut();
     hits.params.clear();
-    for (col, area) in [(&col_a_params[..], mid[0]), (&col_b_params[..], mid[2])] {
-        for (i, &p) in col.iter().enumerate() {
-            hits.params.push((
-                p,
-                Rect::new(area.x, area.y + i as u16, area.width, 1),
-            ));
+    for (col, area) in [(col_a, mid[0]), (col_b, mid[2])] {
+        let mut lines = Vec::with_capacity(col.len());
+        for (i, (param, line)) in col.into_iter().enumerate() {
+            if let Some(p) = param {
+                hits.params
+                    .push((p, Rect::new(area.x, area.y + i as u16, area.width, 1)));
+            }
+            lines.push(line);
         }
+        f.render_widget(Paragraph::new(lines), area);
     }
     hits.presets = Some(rows[1]);
     drop(hits);
@@ -1399,18 +1401,12 @@ fn ui(f: &mut Frame, app: &App) {
     let width = 33;
     let black_slots: Vec<_> = blacks.iter().map(|&(c, ch)| (c, ch, act(ch))).collect();
     let white_slots: Vec<_> = whites.iter().map(|&(c, ch, _)| (c, ch, act(ch))).collect();
-    let note_slots: Vec<_> = whites.iter().map(|&(c, _, n)| (c, n, false)).collect();
     let piano = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
+        .constraints([Constraint::Length(1), Constraint::Length(1)])
         .split(rows[6]);
     f.render_widget(Paragraph::new(key_line(&black_slots, width)), piano[0]);
     f.render_widget(Paragraph::new(key_line(&white_slots, width)), piano[1]);
-    f.render_widget(Paragraph::new(key_line(&note_slots, width)), piano[2]);
 
     // --- footer ---
     let mut hint = String::from(
