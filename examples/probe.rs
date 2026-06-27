@@ -1,8 +1,8 @@
-//! Probe the generalized FM drum voice with the 3 default presets.
+//! Stereo FM drum probe: confirm L != R (the per-channel difference works) and stays finite.
 use fundsp::prelude64::*;
 
-fn build_drum(v: [f32; 9], vel: f32) -> Box<dyn AudioUnit> {
-    let base = (30.0 * 300.0_f32.powf(v[0])) as f64;
+fn drum_mono(v: [f32; 9], vel: f32, pitch_mul: f64) -> An<impl AudioNode<Inputs = U0, Outputs = U1>> {
+    let base = (30.0 * 300.0_f32.powf(v[0])) as f64 * pitch_mul;
     let ratio = (0.5 + v[1] * 7.5) as f64;
     let fm_idx = (v[2] * 8.0) as f64;
     let fmdec = (5.0 + v[3] * 70.0) as f64;
@@ -17,43 +17,27 @@ fn build_drum(v: [f32; 9], vel: f32) -> Box<dyn AudioUnit> {
     let midx = lfo(move |t| fm_idx * base * ratio * (-t * fmdec).exp());
     let env = lfo(move |t| amp * (-t * dec).exp());
     let nenv = lfo(move |t| amp * snap * (-t * dec).exp());
-    let osc = ((carrier + (modf >> sine()) * midx) >> sine()) * env;
-    Box::new(osc + (noise() >> highpass_hz(tone, 1.0)) * nenv)
+    ((carrier + (modf >> sine()) * midx) >> sine()) * env + (noise() >> highpass_hz(tone, 1.0)) * nenv
 }
 
-fn peak(name: &str, v: [f32; 9]) {
-    let mut u = build_drum(v, 0.9);
-    u.set_sample_rate(48000.0);
-    u.allocate();
-    let (mut m, mut nan) = (0f32, false);
+fn check(name: &str, snd: [f32; 9], det: f64, haas: f32) {
+    // two slightly different takes (simulating the per-channel randomiser) + detune + Haas
+    let mut vr = snd; vr[2] += 0.05; vr[7] += 0.05; // R nudged
+    let l = drum_mono(snd, 0.9, 2f64.powf(-det / 2.0 / 1200.0));
+    let r = drum_mono(vr, 0.9, 2f64.powf(det / 2.0 / 1200.0)) >> delay(haas);
+    let mut v: Box<dyn AudioUnit> = Box::new(l | r);
+    v.set_sample_rate(48000.0); v.allocate();
+    let (mut ml, mut mr, mut diff, mut nan) = (0f32, 0f32, 0f32, false);
     for _ in 0..24000 {
-        let x = u.get_mono();
-        if !x.is_finite() { nan = true; }
-        m = m.max(x.abs());
+        let (l, r) = v.get_stereo();
+        if !l.is_finite() || !r.is_finite() { nan = true; }
+        ml = ml.max(l.abs()); mr = mr.max(r.abs()); diff = diff.max((l - r).abs());
     }
-    println!("{name:6} peak={m:.4} nan={nan}");
+    println!("{name:6} L={ml:.3} R={mr:.3} L-R_max={diff:.3} nan={nan}");
 }
 
 fn main() {
-    peak("kick", [0.18, 0.10, 0.20, 0.70, 0.55, 0.65, 0.45, 0.10, 0.10]);
-    peak("snare", [0.42, 0.25, 0.40, 0.60, 0.20, 0.70, 0.25, 0.70, 0.50]);
-    peak("hihat", [0.72, 0.45, 0.60, 0.20, 0.00, 0.50, 0.12, 0.60, 0.80]);
-    // noise burst through the snappy compressor (amount 0.7)
-    let mut c = (noise() * 0.6) >> comp_node(0.7);
-    c.set_sample_rate(48000.0); c.allocate();
-    let (mut m, mut nan) = (0f32, false);
-    for _ in 0..24000 { let x = c.get_mono(); if !x.is_finite() { nan = true; } m = m.max(x.abs()); }
-    println!("kick>comp peak={m:.4} nan={nan}");
-}
-
-// ---- compressor sanity (appended) ----
-fn comp_node(amount: f64) -> An<impl AudioNode<Inputs = U1, Outputs = U1>> {
-    let detect = shape_fn(|x: f32| if x < 0.0 { -x } else { x }) >> afollow(0.002, 0.08);
-    (pass() ^ detect) >> map(move |f: &Frame<f32, U2>| {
-        let a = amount as f32;
-        let thresh = 0.5 - 0.4 * a; let ratio = 1.0 + a * 8.0; let makeup = 1.0 + a * 1.6;
-        let env = if f[1] < 1e-6 { 1e-6 } else { f[1] };
-        let g = if env > thresh { (thresh / env).powf(1.0 - 1.0 / ratio) } else { 1.0 };
-        f[0] * g * makeup
-    })
+    check("kick",  [0.18,0.10,0.20,0.70,0.55,0.65,0.45,0.10,0.10], 4.0, 0.003);
+    check("snare", [0.42,0.25,0.40,0.60,0.20,0.70,0.25,0.70,0.50], 12.0, 0.008);
+    check("hihat", [0.72,0.45,0.60,0.20,0.00,0.50,0.12,0.60,0.80], 16.0, 0.012);
 }

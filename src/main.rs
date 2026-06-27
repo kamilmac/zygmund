@@ -48,14 +48,16 @@ const DIM: Color = Color::Rgb(95, 98, 120);
 const BG: Color = Color::Rgb(16, 14, 20);
 
 const DRUMS: [&str; 3] = ["KICK", "SNARE", "HIHAT"];
-const PARAMS: [&str; 9] = [
-    "Tune", "Ratio", "FM", "FMDec", "PEnv", "PDec", "Decay", "Snap", "Tone",
+const PARAMS: [&str; 12] = [
+    "Tune", "Ratio", "FM", "FMDec", "PEnv", "PDec", "Decay", "Snap", "Tone", "Haas", "Detune",
+    "Rand",
 ];
 const MASTER: [&str; 5] = ["Drive", "Reverb", "Comp", "Bits", "Volume"];
-const NP: usize = 9; // params per drum
+const NP: usize = 12; // params per drum (9 sound + Haas/Detune/Rand stereo props)
+const NDP: usize = NP * 3; // total drum-param control ids
 const NMASTER: usize = MASTER.len();
 const NROWS: usize = NP + NMASTER; // selectable rows: drum params + master
-const BITS_ID: usize = 27 + 3; // control id of the Bits (discrete) master param
+const BITS_ID: usize = NDP + 3; // control id of the Bits (discrete) master param
 
 const BIT_OPTIONS: [(&str, f32); 6] = [
     ("off", 0.0),
@@ -73,9 +75,9 @@ struct DrumParams {
     p: [f32; NP], // tune, ratio, fm, fmdec, penv, pdec, decay, snap, tone (all 0..1)
 }
 
-fn build_drum(d: DrumParams, vel: f32) -> Box<dyn AudioUnit> {
-    let v = d.p;
-    let base = (30.0 * 300.0_f32.powf(v[0])) as f64; // 30..9000 Hz (exp)
+/// One mono FM percussion voice from the 9 sound params. `pitch_mul` detunes it (for L/R).
+fn drum_mono(v: [f32; 9], vel: f32, pitch_mul: f64) -> An<impl AudioNode<Inputs = U0, Outputs = U1>> {
+    let base = (30.0 * 300.0_f32.powf(v[0])) as f64 * pitch_mul; // 30..9000 Hz (exp)
     let ratio = (0.5 + v[1] * 7.5) as f64; // 0.5..8
     let fm_idx = (v[2] * 8.0) as f64; // modulation index
     let fmdec = (5.0 + v[3] * 70.0) as f64; // fm index decay rate
@@ -93,8 +95,23 @@ fn build_drum(d: DrumParams, vel: f32) -> Box<dyn AudioUnit> {
     let nenv = lfo(move |t| amp * snap * (-t * dec).exp());
     let osc = ((carrier + (modf >> sine()) * midx) >> sine()) * env;
     let noise_part = (noise() >> highpass_hz(tone, 1.0)) * nenv;
-    Box::new(osc + noise_part)
+    osc + noise_part
 }
+
+/// Stereo voice: independently-perturbed L/R takes, detuned apart, R Haas-delayed. 0 in, 2 out.
+fn build_drum_stereo(
+    vl: [f32; 9],
+    vr: [f32; 9],
+    vel: f32,
+    mul_l: f64,
+    mul_r: f64,
+    haas: f64,
+) -> Box<dyn AudioUnit> {
+    let l = drum_mono(vl, vel, mul_l);
+    let r = drum_mono(vr, vel, mul_r) >> delay(haas as f32);
+    Box::new(l | r)
+}
+
 
 fn drum_length(d: &DrumParams) -> f64 {
     (0.08 + 1.8 * d.p[6]) as f64
@@ -104,7 +121,8 @@ const SCOPE_N: usize = 64;
 
 /// Render the dry voice offline and capture a short waveform window (peak-per-bin) for the scope.
 fn capture_scope(p: DrumParams, sr: f32) -> [f32; SCOPE_N] {
-    let mut v = build_drum(p, 0.95);
+    let snd: [f32; 9] = p.p[..9].try_into().unwrap();
+    let mut v: Box<dyn AudioUnit> = Box::new(drum_mono(snd, 0.95, 1.0));
     v.set_sample_rate(sr as f64);
     v.allocate();
     let window = (0.05 * sr) as usize; // ~50 ms
@@ -177,7 +195,6 @@ fn build_net(
     sr: f64,
 ) -> Net {
     let mut net = Net::wrap(seq_backend);
-    net = net >> pan(0.0);
     // drive (dry/wet hard tanh)
     let dist = (pass() * 3.0 >> shape(Tanh(2.0))) | (pass() * 3.0 >> shape(Tanh(2.0)));
     net = net
@@ -254,7 +271,7 @@ fn load_cc_map() -> HashMap<u8, usize> {
             let mut it = line.split(',');
             if let (Some(cc), Some(id)) = (it.next(), it.next()) {
                 if let (Ok(cc), Ok(id)) = (cc.parse::<u8>(), id.parse::<usize>()) {
-                    if id < 30 {
+                    if id < NDP + NMASTER {
                         m.insert(cc, id);
                     }
                 }
@@ -302,6 +319,7 @@ struct App {
     toast: Option<String>,
     toast_until: f32,
     hits: RefCell<Hits>,
+    rng: u64,
     clock: Instant,
 }
 
@@ -311,15 +329,15 @@ impl App {
         if self.sel_row < NP {
             self.sel_drum * NP + self.sel_row
         } else {
-            27 + (self.sel_row - NP)
+            NDP + (self.sel_row - NP)
         }
     }
 
     fn control_norm(&self, id: usize) -> f32 {
-        if id < 27 {
+        if id < NDP {
             self.drums[id / NP].p[id % NP]
         } else {
-            match id - 27 {
+            match id - NDP {
                 0 => self.drive_sh.value(),
                 1 => self.reverb_sh.value(),
                 2 => self.comp_sh.value(),
@@ -331,10 +349,10 @@ impl App {
 
     fn set_norm(&mut self, id: usize, n: f32) {
         let n = n.clamp(0.0, 1.0);
-        if id < 27 {
+        if id < NDP {
             self.drums[id / NP].p[id % NP] = n;
         } else {
-            match id - 27 {
+            match id - NDP {
                 0 => self.drive_sh.set_value(n),
                 1 => self.reverb_sh.set_value(n),
                 2 => self.comp_sh.set_value(n),
@@ -359,14 +377,36 @@ impl App {
         }
     }
 
+    fn rnd(&mut self) -> f32 {
+        let mut x = self.rng;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.rng = x;
+        ((x >> 40) as f32 / (1u64 << 24) as f32) * 2.0 - 1.0
+    }
+
     fn trigger(&mut self, drum: usize, vel: f32) {
         self.sel_drum = drum;
         self.flash[drum] = self.clock.elapsed().as_secs_f32();
         let p = self.drums[drum];
-        let voice = build_drum(p, vel);
+        let snd: [f32; 9] = p.p[..9].try_into().unwrap();
+        let haas = (p.p[9] * 0.03) as f64; // 0..30 ms inter-channel delay
+        let det_cents = (p.p[10] * 40.0) as f64; // up to 40 cents L/R spread
+        let rand = p.p[11];
+        // per-channel randomiser: nudge each sound param a little differently on L and R, per hit
+        let mut vl = snd;
+        let mut vr = snd;
+        for i in 0..9 {
+            vl[i] = (snd[i] + rand * 0.15 * self.rnd()).clamp(0.0, 1.0);
+            vr[i] = (snd[i] + rand * 0.15 * self.rnd()).clamp(0.0, 1.0);
+        }
+        let mul_l = 2f64.powf(-det_cents / 2.0 / 1200.0);
+        let mul_r = 2f64.powf(det_cents / 2.0 / 1200.0);
+        let voice = build_drum_stereo(vl, vr, vel, mul_l, mul_r, haas);
         let len = drum_length(&p);
         self.sequencer.push_relative(0.0, len, Fade::Smooth, 0.001, 0.02, voice);
-        self.scope[drum] = capture_scope(p, self.sr); // refresh the on-screen waveform
+        self.scope[drum] = capture_scope(p, self.sr);
     }
 
     fn set_toast(&mut self, m: String) {
@@ -403,10 +443,10 @@ impl App {
 }
 
 fn control_name(id: usize) -> String {
-    if id < 27 {
+    if id < NDP {
         format!("{} {}", DRUMS[id / NP], PARAMS[id % NP])
     } else {
-        MASTER[id - 27].to_string()
+        MASTER[id - NDP].to_string()
     }
 }
 
@@ -485,11 +525,11 @@ fn handle_mouse(app: &mut App, me: MouseEvent) {
 }
 
 fn select_id(app: &mut App, id: usize) {
-    if id < 27 {
+    if id < NDP {
         app.sel_drum = id / NP;
         app.sel_row = id % NP;
     } else {
-        app.sel_row = NP + (id - 27);
+        app.sel_row = NP + (id - NDP);
     }
 }
 
@@ -549,12 +589,12 @@ fn render_cell(f: &mut RFrame, area: Rect, app: &App, drum: usize, hits: &mut Hi
 
     let parts = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Length(3), Constraint::Min(0)])
+        .constraints([Constraint::Length(6), Constraint::Length(3), Constraint::Min(0)])
         .split(inner);
 
     // top params 0..4
     let mut top = Vec::new();
-    for pi in 0..4 {
+    for pi in 0..6 {
         top.push(param_line(app, drum, pi, active));
         hits.cells.push((drum * NP + pi, Rect::new(inner.x + 7, parts[0].y + pi as u16, 8, 1)));
     }
@@ -583,9 +623,9 @@ fn render_cell(f: &mut RFrame, area: Rect, app: &App, drum: usize, hits: &mut Hi
 
     // bottom params 4..9
     let mut bot = Vec::new();
-    for pi in 4..NP {
+    for pi in 6..NP {
         bot.push(param_line(app, drum, pi, active));
-        hits.cells.push((drum * NP + pi, Rect::new(inner.x + 7, parts[2].y + (pi - 4) as u16, 8, 1)));
+        hits.cells.push((drum * NP + pi, Rect::new(inner.x + 7, parts[2].y + (pi - 6) as u16, 8, 1)));
     }
     f.render_widget(Paragraph::new(bot), parts[2]);
 }
@@ -628,7 +668,7 @@ fn ui(f: &mut RFrame, app: &App) {
     let base_x = rows[1].x + 9;
     let slot: u16 = 20;
     for mi in 0..NMASTER {
-        let id = 27 + mi;
+        let id = NDP + mi;
         let sel = app.sel_row == NP + mi;
         let (valstr, ratio) = if mi == 3 {
             (BIT_OPTIONS[app.bits_idx].0.to_string(), app.bits_idx as f32 / (BIT_OPTIONS.len() - 1) as f32)
@@ -715,7 +755,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config: cpal::StreamConfig = supported.into();
     let sample_rate = config.sample_rate as f64;
 
-    let mut sequencer = Sequencer::new(0, 1, ReplayMode::None);
+    let mut sequencer = Sequencer::new(0, 2, ReplayMode::None);
     sequencer.set_sample_rate(sample_rate);
     let seq_backend = sequencer.backend();
 
@@ -758,9 +798,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // defaults: rough kick / snare / hihat
     let drums = [
-        DrumParams { p: [0.18, 0.10, 0.20, 0.70, 0.55, 0.65, 0.45, 0.10, 0.10] },
-        DrumParams { p: [0.42, 0.25, 0.40, 0.60, 0.20, 0.70, 0.25, 0.70, 0.50] },
-        DrumParams { p: [0.72, 0.45, 0.60, 0.20, 0.00, 0.50, 0.12, 0.60, 0.80] },
+        DrumParams { p: [0.18, 0.10, 0.20, 0.70, 0.55, 0.65, 0.45, 0.10, 0.10, 0.10, 0.10, 0.15] },
+        DrumParams { p: [0.42, 0.25, 0.40, 0.60, 0.20, 0.70, 0.25, 0.70, 0.50, 0.25, 0.30, 0.35] },
+        DrumParams { p: [0.72, 0.45, 0.60, 0.20, 0.00, 0.50, 0.12, 0.60, 0.80, 0.35, 0.40, 0.40] },
     ];
 
     let mut app = App {
@@ -775,6 +815,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         drums,
         scope: [[0.0; SCOPE_N]; 3],
         sr: sample_rate as f32,
+        rng: 0x1234_5678_9abc_def1,
         sel_drum: 0,
         sel_row: 0,
         flash: [-1.0; 3],
