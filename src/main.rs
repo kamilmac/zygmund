@@ -1,16 +1,14 @@
-//! zygmunt — a compact polyphonic ADSR synthesizer that plays from the terminal.
+//! zygdrum — a 3-voice FM drum synth for glitch / IDM / Aphex-flavoured percussion.
 //!
-//! Architecture (the load-bearing boundary):
-//!   UI thread  --(fundsp Sequencer frontend: lock-free)-->  audio thread (cpal callback)
-//! The UI thread owns all view + parameter state and pushes note events into the Sequencer.
-//! The audio thread owns only DSP state and never allocates/locks/blocks.
-//! Each note is a fresh voice that bakes the *current* ADSR; live knobs (reverb, volume)
-//! ride atomic `Shared` values the audio graph reads each block.
+//! Three one-shot FM percussion voices, each triggered by a note pitch-class:
+//!   C -> kick   ·   D -> snare/clap   ·   E -> rimshot/hihat
+//! (computer keys a / s / d, or MIDI notes by pitch class, velocity-sensitive).
+//! Each voice is built fresh per hit with the current knobs baked in, pushed to the fundsp
+//! Sequencer as a finite one-shot. Master glitch chain: drive (tanh) -> volume -> limiter, with a
+//! bit-crusher in the audio callback. Architecture mirrors zygmunt: UI thread owns state and pushes
+//! hits; the cpal callback owns DSP and never allocates.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::io::{self, Stdout};
-use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
@@ -22,20 +20,13 @@ use fundsp::prelude64::*;
 use midir::{Ignore, MidiInput, MidiInputConnection};
 
 use ratatui::crossterm::{
-    event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-        KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-    },
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
-    terminal::{
-        disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
-        LeaveAlternateScreen,
-    },
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
@@ -43,499 +34,146 @@ use ratatui::{
 };
 
 // ---------- palette ----------
-const ACCENT: Color = Color::Rgb(125, 207, 255); // soft cyan-blue
+const ACCENT: Color = Color::Rgb(255, 150, 90); // warm orange (drums)
 const IDLE: Color = Color::Rgb(165, 170, 185);
 const DIM: Color = Color::Rgb(95, 98, 120);
-const BG: Color = Color::Rgb(18, 18, 26);
+const BG: Color = Color::Rgb(16, 14, 20);
 
-/// Per-voice gain. Voices sum in the sequencer, so this is kept low to leave headroom for chords
-/// (the master limiter then only needs to catch the occasional transient, not constant overshoot).
-const VEL: f32 = 0.22;
+const DRUMS: [&str; 3] = ["KICK", "SNARE", "HIHAT"];
 
-/// Output bit-depth options: (label, quantization levels). 0.0 = off (full float).
-/// levels = 2^(bits-1); the callback rounds each sample to `levels` steps.
-const BIT_OPTIONS: [(&str, f32); 4] = [
+/// Bit-crush options (label, quantization levels). 0 = off. Aggressive end for IDM.
+const BIT_OPTIONS: [(&str, f32); 6] = [
     ("off", 0.0),
-    ("16-bit", 32768.0),
     ("12-bit", 2048.0),
     ("8-bit", 128.0),
+    ("6-bit", 32.0),
+    ("4-bit", 8.0),
+    ("3-bit", 4.0),
 ];
 
-// ---------- waveform ----------
-#[derive(Clone, Copy, PartialEq)]
-enum Wave {
-    Sine,
-    Saw,
-    Square,
-    Triangle,
-}
-impl Wave {
-    const ALL: [Wave; 4] = [Wave::Sine, Wave::Saw, Wave::Square, Wave::Triangle];
-    fn label(self) -> &'static str {
-        match self {
-            Wave::Sine => "sine",
-            Wave::Saw => "saw",
-            Wave::Square => "square",
-            Wave::Triangle => "triangle",
-        }
-    }
-    fn step(self, d: i32) -> Wave {
-        let i = Wave::ALL.iter().position(|w| *w == self).unwrap() as i32;
-        let n = Wave::ALL.len() as i32;
-        Wave::ALL[(((i + d) % n + n) % n) as usize]
-    }
+// ---------- drum voice ----------
+
+#[derive(Clone, Copy)]
+struct DrumParams {
+    tune: f32,
+    decay: f32,
+    fm: f32,
+    snap: f32,
 }
 
-// ---------- selectable parameter ----------
-#[derive(Clone, Copy, PartialEq)]
-enum Param {
-    Attack,
-    Decay,
-    Sustain,
-    Release,
-    Drift,
-    Detune,
-    Sub,
-    Noise,
-    Hiss,
-    Cutoff,
-    Resonance,
-    FEnv,
-    FDecay,
-    Drive,
-    Chorus,
-    Delay,
-    DFeed,
-    RevAmount,
-    RevRoom,
-    RevTime,
-    RevDiffusion,
-    Eq1k,
-    Volume,
-    Comp,
-    Bits,
-    Chaos,
+/// FM kick: sine carrier with a fast pitch drop, FM body, and a short noise click.
+fn build_kick(p: DrumParams, vel: f32) -> Box<dyn AudioUnit> {
+    let base = (35.0 + 55.0 * p.tune) as f64; // 35..90 Hz floor
+    let drop = 150.0_f64;
+    let amp_rate = (16.0 - 12.0 * p.decay) as f64; // fast..slow
+    let fm_amt = (p.fm * 350.0) as f64;
+    let snap = p.snap as f64;
+    let amp = (vel * 0.9) as f64;
+    let carrier = lfo(move |t| base + drop * (-t * 40.0).exp());
+    let modf = lfo(move |t| base + drop * (-t * 40.0).exp());
+    let mi = lfo(move |t| fm_amt * (-t * 26.0).exp());
+    let env = lfo(move |t| amp * (-t * amp_rate).exp());
+    let click = lfo(move |t| snap * (-t * 350.0).exp());
+    let body = ((carrier + (modf >> sine()) * mi) >> sine()) * env;
+    Box::new(body + noise() * click)
 }
-impl Param {
-    const ALL: [Param; 26] = [
-        Param::Attack,
-        Param::Decay,
-        Param::Sustain,
-        Param::Release,
-        Param::Drift,
-        Param::Detune,
-        Param::Sub,
-        Param::Noise,
-        Param::Hiss,
-        Param::Cutoff,
-        Param::Resonance,
-        Param::FEnv,
-        Param::FDecay,
-        Param::Drive,
-        Param::Chorus,
-        Param::Delay,
-        Param::DFeed,
-        Param::RevAmount,
-        Param::RevRoom,
-        Param::RevTime,
-        Param::RevDiffusion,
-        Param::Eq1k,
-        Param::Volume,
-        Param::Comp,
-        Param::Bits,
-        Param::Chaos,
-    ];
-    fn step(self, d: i32) -> Param {
-        let i = Param::ALL.iter().position(|p| *p == self).unwrap() as i32;
-        let n = Param::ALL.len() as i32;
-        Param::ALL[(((i + d) % n + n) % n) as usize]
-    }
-    fn name(self) -> &'static str {
-        match self {
-            Param::Attack => "Attack",
-            Param::Decay => "Decay",
-            Param::Sustain => "Sustain",
-            Param::Release => "Release",
-            Param::Drift => "Drift",
-            Param::Detune => "Detune",
-            Param::Sub => "Sub",
-            Param::Noise => "Noise",
-            Param::Hiss => "Hiss",
-            Param::Cutoff => "Cutoff",
-            Param::Resonance => "Reso",
-            Param::FEnv => "F.Env",
-            Param::FDecay => "F.Decay",
-            Param::Drive => "Drive",
-            Param::Chorus => "Chorus",
-            Param::Delay => "Delay",
-            Param::DFeed => "D.Feed",
-            Param::RevAmount => "Reverb",
-            Param::RevRoom => "Room",
-            Param::RevTime => "Time",
-            Param::RevDiffusion => "Diffuse",
-            Param::Eq1k => "EQ 1k",
-            Param::Volume => "Volume",
-            Param::Comp => "Comp",
-            Param::Bits => "Bits",
-            Param::Chaos => "Chaos",
-        }
+
+/// FM snare: short inharmonic FM body plus a filtered noise crack.
+fn build_snare(p: DrumParams, vel: f32) -> Box<dyn AudioUnit> {
+    let base = (150.0 + 150.0 * p.tune) as f64; // 150..300
+    let amp_rate = (28.0 - 16.0 * p.decay) as f64;
+    let fm_amt = (p.fm * 250.0) as f64;
+    let noise_amt = (0.5 + p.snap) as f64;
+    let amp = (vel * 0.8) as f64;
+    let cf = lfo(move |t| base + 90.0 * (-t * 55.0).exp());
+    let mf = lfo(move |t| (base + 90.0 * (-t * 55.0).exp()) * 1.6); // inharmonic ratio
+    let mi = lfo(move |t| fm_amt * (-t * 45.0).exp());
+    let benv = lfo(move |t| amp * 0.7 * (-t * (amp_rate + 10.0)).exp());
+    let nenv = lfo(move |t| amp * noise_amt * (-t * amp_rate).exp());
+    let body = ((cf + (mf >> sine()) * mi) >> sine()) * benv;
+    let noise_part = (noise() >> highpass_hz(1400.0, 1.0)) * nenv;
+    Box::new(body + noise_part)
+}
+
+/// FM hihat/rimshot: bright inharmonic metallic FM plus high-passed noise, very fast decay.
+fn build_hihat(p: DrumParams, vel: f32) -> Box<dyn AudioUnit> {
+    let base = 3500.0 + 5000.0 * p.tune; // metallic base (f32 for `constant`)
+    let amp_rate = (80.0 - 55.0 * p.decay) as f64; // very fast..fast
+    let fm_amt = p.fm * 4000.0; // f32: scalar mult on An needs f32
+    let noise_amt = 0.4 + p.snap;
+    let amp = (vel * 0.6) as f64;
+    let metallic = (constant(base) + (constant(base * 1.43) >> sine()) * fm_amt) >> sine();
+    let env = lfo(move |t| amp * (-t * amp_rate).exp());
+    let hat = (metallic * 0.45 + (noise() >> highpass_hz(6500.0, 1.0)) * noise_amt) * env;
+    Box::new(hat)
+}
+
+fn build_drum(drum: usize, p: DrumParams, vel: f32) -> Box<dyn AudioUnit> {
+    match drum {
+        0 => build_kick(p, vel),
+        1 => build_snare(p, vel),
+        _ => build_hihat(p, vel),
     }
 }
 
-// ---------- DSP construction ----------
-
-/// One polyphonic voice: drifting oscillator * ADSR envelope * velocity. Mono (0 in, 1 out).
-/// `drift` is the analog-style pitch instability (fraction of pitch); each voice gets its own
-/// `seed` so notes in a chord wander independently. ADSR + drift bake in at build time.
-#[allow(clippy::too_many_arguments)]
-fn build_voice(
-    wave: Wave,
-    hz: f32,
-    vel: f32,
-    gate: &Shared,
-    a: f32,
-    d: f32,
-    s: f32,
-    r: f32,
-    drift: f32,
-    detune: f32,
-    sub_level: f32,
-    noise_amt: f32,
-    pitch_mod: &Shared,
-    seed: u64,
-) -> Box<dyn AudioUnit> {
-    // Three detuned oscillators per voice, each wandering on its own drift noise (analog-style
-    // unison: the copies beat against each other so the tone moves instead of sitting still).
-    // Pitch = drift wander * global pitch-mod (chaos bends held notes live). prelude64 lfo time is f64.
-    let (hz, drift, det) = (hz as f64, drift as f64, detune as f64 * 0.02);
-    let (pm0, pm1, pm2, pms) = (
-        pitch_mod.clone(),
-        pitch_mod.clone(),
-        pitch_mod.clone(),
-        pitch_mod.clone(),
-    );
-    // All three share the same drift wander (same seed/rate) so Detune is the ONLY thing that
-    // spreads them. At Detune 0 they collapse onto one frequency -> a single oscillator.
-    let p0 = lfo(move |t| hz * (1.0 + drift * spline_noise(seed, t * 3.0)) * pm0.value() as f64);
-    let p1 = lfo(move |t| {
-        hz * (1.0 + det) * (1.0 + drift * spline_noise(seed, t * 3.0)) * pm1.value() as f64
-    });
-    let p2 = lfo(move |t| {
-        hz * (1.0 - det) * (1.0 + drift * spline_noise(seed, t * 3.0)) * pm2.value() as f64
-    });
-    // Sub-oscillator: square wave two octaves below, tracking the same pitch.
-    let sub = lfo(move |t| {
-        0.25 * hz * (1.0 + drift * spline_noise(seed, t * 3.0)) * pms.value() as f64
-    });
-    let sub_level = sub_level * 0.6; // map knob (0..1) to a musical sub amplitude
-    let env = var(gate) >> adsr_live(a, d, s, r);
-    // unison osc sum (normalised) + sub + white noise, shaped by the envelope and velocity
-    match wave {
-        Wave::Sine => Box::new(
-            (((p0 >> sine()) + (p1 >> sine()) + (p2 >> sine())) * 0.33
-                + (sub >> square()) * sub_level
-                + noise() * noise_amt)
-                * env
-                * vel,
-        ),
-        Wave::Saw => Box::new(
-            (((p0 >> saw()) + (p1 >> saw()) + (p2 >> saw())) * 0.33
-                + (sub >> square()) * sub_level
-                + noise() * noise_amt)
-                * env
-                * vel,
-        ),
-        Wave::Square => Box::new(
-            (((p0 >> square()) + (p1 >> square()) + (p2 >> square())) * 0.33
-                + (sub >> square()) * sub_level
-                + noise() * noise_amt)
-                * env
-                * vel,
-        ),
-        Wave::Triangle => Box::new(
-            (((p0 >> triangle()) + (p1 >> triangle()) + (p2 >> triangle())) * 0.33
-                + (sub >> square()) * sub_level
-                + noise() * noise_amt)
-                * env
-                * vel,
-        ),
+/// One-shot length in seconds (the sequencer removes the voice after this).
+fn drum_length(drum: usize, p: &DrumParams) -> f64 {
+    match drum {
+        0 => (0.15 + 1.0 * p.decay) as f64,
+        1 => (0.08 + 0.4 * p.decay) as f64,
+        _ => (0.03 + 0.25 * p.decay) as f64,
     }
 }
 
-/// Build a ready-to-trigger voice. `adsr_live` only attacks after it has seen the gate at <=0
-/// once, so we tick it a single time at gate=0 to arm it, then raise the gate to 1.0 — the
-/// attack then fires on the first tick inside the sequencer (no cross-thread race).
-#[allow(clippy::too_many_arguments)]
-fn make_voice(
-    wave: Wave,
-    hz: f32,
-    vel: f32,
-    a: f32,
-    d: f32,
-    s: f32,
-    r: f32,
-    drift: f32,
-    detune: f32,
-    sub_level: f32,
-    noise_amt: f32,
-    pitch_mod: &Shared,
-    seed: u64,
-) -> (Box<dyn AudioUnit>, Shared) {
-    let gate = shared(0.0);
-    let mut voice = build_voice(
-        wave, hz, vel, &gate, a, d, s, r, drift, detune, sub_level, noise_amt, pitch_mod, seed,
-    );
-    voice.allocate();
-    voice.get_mono(); // observe gate<=0 once
-    gate.set_value(1.0);
-    (voice, gate)
+/// C/D/E pitch classes -> kick/snare/hihat.
+fn drum_for_semitone(st: i32) -> Option<usize> {
+    match st.rem_euclid(12) {
+        0 => Some(0), // C
+        2 => Some(1), // D
+        4 => Some(2), // E
+        _ => None,
+    }
 }
 
-/// The reverb tail node (room/time/diffusion bake into its delay lines, so changing them means
-/// rebuilding this node and crossfading it in).
-fn create_reverb(room: f32, time: f32, diffusion: f32) -> Box<dyn AudioUnit> {
-    Box::new(reverb2_stereo(
-        room,
-        time,
-        diffusion,
-        1.0,
-        highshelf_hz(5000.0, 1.0, db_amp(-1.0)),
-    ))
-}
-
-/// Wrap the sequencer backend into the master stereo chain: pan -> dry/wet reverb -> volume.
-/// `reverb_amt` and `volume` are read live (smoothed); the reverb node is returned by id so its
-/// room/time/diffusion can be crossfaded live.
-/// A deliberately strange stereo delay. Each channel's delay time warbles on its own slow random
-/// LFO (echoes drift in pitch), the two channels run at an odd time ratio (0.33 s vs 0.49 s — a
-/// lopsided, non-rhythmic ping-pong), and the feedback path swaps L/R and darkens each repeat.
-/// `dfeed` sets the feedback (number of repeats).
-fn strange_delay(dfeed: &Shared) -> An<impl AudioNode<Inputs = U2, Outputs = U2>> {
-    let delay_l = (pass()
-        | lfo(|t: f64| 0.33 * (1.0 + 0.06 * spline_noise::<f64>(11, t * 0.7))))
-        >> tap_linear(0.02, 1.2);
-    let delay_r = (pass()
-        | lfo(|t: f64| 0.49 * (1.0 + 0.06 * spline_noise::<f64>(22, t * 0.5))))
-        >> tap_linear(0.02, 1.2);
-    feedback(
-        reverse::<U2>()
-            >> (delay_l | delay_r)
-            >> (lowpass_hz(2400.0, 1.0) | lowpass_hz(2400.0, 1.0))
-            >> ((var(dfeed) >> follow(0.05) >> split::<U2>()) * multipass::<U2>()),
-    )
-}
-
-/// Parallel mid-focused soft saturator (stereo): boost ~900 Hz into a tanh, then trim it back so
-/// the harmonics land in the midrange. Blended dry/wet by `drive` (0 = clean).
-fn saturator() -> An<impl AudioNode<Inputs = U2, Outputs = U2>> {
-    let sat_l =
-        bell_hz(900.0, 0.6, db_amp(6.0)) >> shape(Tanh(2.0)) >> bell_hz(900.0, 0.6, db_amp(-3.0));
-    let sat_r =
-        bell_hz(900.0, 0.6, db_amp(6.0)) >> shape(Tanh(2.0)) >> bell_hz(900.0, 0.6, db_amp(-3.0));
-    sat_l | sat_r
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_net(
-    seq_backend: Box<dyn AudioUnit>,
-    cutoff: &Shared,
-    resonance: &Shared,
-    drive: &Shared,
-    chorus_amt: &Shared,
-    delay_mix: &Shared,
-    dfeed: &Shared,
-    eq1k: &Shared,
-    reverb_amt: &Shared,
-    volume: &Shared,
-    comp: &Shared,
-    hiss: &Shared,
-    room: f32,
-    time: f32,
-    diffusion: f32,
-    sr: f64,
-) -> (Net, NodeId) {
-    let mut net = Net::wrap(seq_backend);
-    // Moog ladder lowpass on the mono bus — cutoff/resonance are live (cutoff smoothed).
-    net = net >> ((pass() | (var(cutoff) >> follow(0.01)) | var(resonance)) >> moog());
-    net = net >> pan(0.0); // mono -> stereo
-    // Mid saturator, blended dry/wet by drive.
-    net = net
-        >> ((1.0 - var(drive) >> follow(0.01) >> split::<U2>()) * multipass::<U2>()
-            & (var(drive) >> follow(0.01) >> split::<U2>()) * saturator());
-    // Stereo chorus (two decorrelated voices), blended dry/wet by chorus_amt.
-    net = net
-        >> ((1.0 - var(chorus_amt) >> follow(0.01) >> split::<U2>()) * multipass::<U2>()
-            & (var(chorus_amt) >> follow(0.01) >> split::<U2>())
-                * (chorus(0, 0.015, 0.005, 0.5) | chorus(1, 0.015, 0.005, 0.5)));
-    // Strange delay (before the reverb), blended dry/wet by delay_mix.
-    net = net
-        >> ((1.0 - var(delay_mix) >> follow(0.01) >> split::<U2>()) * multipass::<U2>()
-            & (var(delay_mix) >> follow(0.01) >> split::<U2>()) * strange_delay(dfeed));
-    let (reverb, reverb_id) = Net::wrap_id(create_reverb(room, time, diffusion));
-    net = net
-        >> ((1.0 - var(reverb_amt) >> follow(0.01) >> split::<U2>()) * multipass::<U2>()
-            & (var(reverb_amt) >> follow(0.01) >> split::<U2>()) * reverb);
-    // 1 kHz EQ dip: subtract a band from the dry signal (eq1k = depth). More bands can be added later.
-    net = net
-        >> (multipass::<U2>()
-            & ((-1.5 * var(eq1k) >> follow(0.02) >> split::<U2>())
-                * (bandpass_hz(1000.0, 1.0) | bandpass_hz(1000.0, 1.0))));
-    net = net >> ((var(volume) >> follow(0.02) >> split::<U2>()) * multipass::<U2>());
-    // Constant analog-style noise floor (pink, independent of note level) added to the bus.
-    net = net
-        >> (multipass::<U2>()
-            + ((pink() | pink()) * (var(hiss) >> follow(0.05) >> split::<U2>())));
-    // Output compressor: drive into a lookahead limiter to gently squash peaks.
-    net = net
-        >> ((var(comp) >> follow(0.02) >> split::<U2>()) * multipass::<U2>())
-        >> limiter_stereo(0.005, 0.1);
-    net.set_sample_rate(sr);
-    (net, reverb_id)
-}
-
-// ---------- keyboard -> note ----------
-
-/// Computer-keyboard piano: home row = white keys, upper row = black keys. Returns a semitone
-/// offset above the octave's C.
 fn key_to_semitone(c: char) -> Option<i32> {
     Some(match c {
-        'a' => 0,  // C
-        'w' => 1,  // C#
-        's' => 2,  // D
-        'e' => 3,  // D#
-        'd' => 4,  // E
-        'f' => 5,  // F
-        't' => 6,  // F#
-        'g' => 7,  // G
-        'y' => 8,  // G#
-        'h' => 9,  // A
-        'u' => 10, // A#
-        'j' => 11, // B
-        'k' => 12, // C (next octave)
+        'a' => 0,
+        'w' => 1,
+        's' => 2,
+        'e' => 3,
+        'd' => 4,
+        'f' => 5,
+        't' => 6,
+        'g' => 7,
+        'y' => 8,
+        'h' => 9,
+        'u' => 10,
+        'j' => 11,
+        'k' => 12,
         _ => return None,
     })
 }
 
-// ---------- presets ----------
+// ---------- master net ----------
 
-/// A full snapshot of the synth's settings, saved to disk so slots survive restarts.
-#[derive(Clone, Copy)]
-struct Preset {
-    wave: usize,
-    octave: i32,
-    attack: f32,
-    decay: f32,
-    sustain: f32,
-    release: f32,
-    drift: f32,
-    noise: f32,
-    cutoff: f32,
-    resonance: f32,
-    reverb_amt: f32,
-    volume: f32,
-    room: f32,
-    time: f32,
-    diffusion: f32,
-    chaos: f32,
-    drive: f32,
-    comp: f32,
-    hiss: f32,
-    fenv: f32,
-    fdecay: f32,
-    delay: f32,
-    dfeed: f32,
-    detune: f32,
-    eq1k: f32,
-    sub: f32,
-    chorus: f32,
-    bits_idx: usize,
-}
-
-impl Preset {
-    fn to_line(&self) -> String {
-        format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
-            self.wave, self.octave, self.attack, self.decay, self.sustain, self.release,
-            self.drift, self.noise, self.cutoff, self.resonance, self.reverb_amt, self.volume,
-            self.room, self.time, self.diffusion, self.chaos, self.bits_idx, self.drive, self.comp,
-            self.hiss, self.fenv, self.fdecay, self.delay, self.dfeed, self.detune, self.eq1k,
-            self.sub, self.chorus,
-        )
-    }
-
-    fn from_line(s: &str) -> Option<Preset> {
-        let p: Vec<&str> = s.split(',').collect();
-        if p.len() != 28 {
-            return None;
-        }
-        Some(Preset {
-            wave: p[0].parse().ok()?,
-            octave: p[1].parse().ok()?,
-            attack: p[2].parse().ok()?,
-            decay: p[3].parse().ok()?,
-            sustain: p[4].parse().ok()?,
-            release: p[5].parse().ok()?,
-            drift: p[6].parse().ok()?,
-            noise: p[7].parse().ok()?,
-            cutoff: p[8].parse().ok()?,
-            resonance: p[9].parse().ok()?,
-            reverb_amt: p[10].parse().ok()?,
-            volume: p[11].parse().ok()?,
-            room: p[12].parse().ok()?,
-            time: p[13].parse().ok()?,
-            diffusion: p[14].parse().ok()?,
-            chaos: p[15].parse().ok()?,
-            bits_idx: p[16].parse().ok()?,
-            drive: p[17].parse().ok()?,
-            comp: p[18].parse().ok()?,
-            hiss: p[19].parse().ok()?,
-            fenv: p[20].parse().ok()?,
-            fdecay: p[21].parse().ok()?,
-            delay: p[22].parse().ok()?,
-            dfeed: p[23].parse().ok()?,
-            detune: p[24].parse().ok()?,
-            eq1k: p[25].parse().ok()?,
-            sub: p[26].parse().ok()?,
-            chorus: p[27].parse().ok()?,
-        })
-    }
-}
-
-fn presets_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".zygmunt-presets.txt")
-}
-
-fn load_presets() -> [Option<Preset>; 9] {
-    let mut out = [None; 9];
-    if let Ok(text) = std::fs::read_to_string(presets_path()) {
-        for (i, line) in text.lines().take(9).enumerate() {
-            if line != "-" {
-                out[i] = Preset::from_line(line);
-            }
-        }
-    }
-    out
-}
-
-fn save_presets(presets: &[Option<Preset>; 9]) {
-    let mut s = String::new();
-    for p in presets {
-        match p {
-            Some(p) => s.push_str(&p.to_line()),
-            None => s.push('-'),
-        }
-        s.push('\n');
-    }
-    let _ = std::fs::write(presets_path(), s);
+/// Master glitch chain: pan -> drive (dry/wet hard tanh) -> volume -> limiter.
+fn build_net(seq_backend: Box<dyn AudioUnit>, drive: &Shared, volume: &Shared, sr: f64) -> Net {
+    let mut net = Net::wrap(seq_backend);
+    net = net >> pan(0.0); // mono -> stereo
+    let dist = (pass() * 3.0 >> shape(Tanh(2.0))) | (pass() * 3.0 >> shape(Tanh(2.0)));
+    net = net
+        >> ((1.0 - var(drive) >> follow(0.01) >> split::<U2>()) * multipass::<U2>()
+            & (var(drive) >> follow(0.01) >> split::<U2>()) * dist);
+    net = net >> ((var(volume) >> follow(0.02) >> split::<U2>()) * multipass::<U2>());
+    net = net >> limiter_stereo(0.003, 0.1);
+    net.set_sample_rate(sr);
+    net
 }
 
 // ---------- MIDI ----------
 
 enum MidiMsg {
     NoteOn { ch: u8, note: u8, vel: u8 },
-    NoteOff { ch: u8, note: u8 },
-    Cc { ch: u8, cc: u8, value: u8 },
 }
 
 fn parse_midi(bytes: &[u8]) -> Option<MidiMsg> {
@@ -543,18 +181,19 @@ fn parse_midi(bytes: &[u8]) -> Option<MidiMsg> {
         return None;
     }
     let ch = bytes[0] & 0x0F;
-    match bytes[0] & 0xF0 {
-        0x90 => Some(MidiMsg::NoteOn { ch, note: bytes[1], vel: bytes[2] }),
-        0x80 => Some(MidiMsg::NoteOff { ch, note: bytes[1] }),
-        0xB0 => Some(MidiMsg::Cc { ch, cc: bytes[1], value: bytes[2] }),
-        _ => None,
+    if bytes[0] & 0xF0 == 0x90 {
+        Some(MidiMsg::NoteOn {
+            ch,
+            note: bytes[1],
+            vel: bytes[2],
+        })
+    } else {
+        None
     }
 }
 
-/// Connect to the first available MIDI input (preferring a Digitakt/Elektron port). The returned
-/// connection must be kept alive to keep receiving. Each message is parsed and sent over `tx`.
 fn setup_midi(tx: Sender<MidiMsg>) -> Option<(MidiInputConnection<()>, String)> {
-    let mut input = MidiInput::new("zygmunt").ok()?;
+    let mut input = MidiInput::new("zygdrum").ok()?;
     input.ignore(Ignore::None);
     let ports = input.ports();
     if ports.is_empty() {
@@ -577,7 +216,7 @@ fn setup_midi(tx: Sender<MidiMsg>) -> Option<(MidiInputConnection<()>, String)> 
     let conn = input
         .connect(
             &port,
-            "zygmunt-in",
+            "zygdrum-in",
             move |_stamp, bytes, _| {
                 if let Some(msg) = parse_midi(bytes) {
                     let _ = tx.send(msg);
@@ -589,577 +228,102 @@ fn setup_midi(tx: Sender<MidiMsg>) -> Option<(MidiInputConnection<()>, String)> 
     Some((conn, name))
 }
 
-fn midi_map_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".zygmunt-midi.txt")
-}
+// ---------- app state ----------
 
-fn load_cc_map() -> HashMap<u8, Param> {
-    let mut m = HashMap::new();
-    if let Ok(text) = std::fs::read_to_string(midi_map_path()) {
-        for line in text.lines() {
-            let mut it = line.split(',');
-            if let (Some(cc), Some(idx)) = (it.next(), it.next()) {
-                if let (Ok(cc), Ok(idx)) = (cc.parse::<u8>(), idx.parse::<usize>()) {
-                    if idx < Param::ALL.len() {
-                        m.insert(cc, Param::ALL[idx]);
-                    }
-                }
-            }
-        }
-    }
-    m
-}
-
-fn save_cc_map(m: &HashMap<u8, Param>) {
-    let mut s = String::new();
-    for (cc, p) in m {
-        let idx = Param::ALL.iter().position(|x| x == p).unwrap_or(0);
-        s.push_str(&format!("{},{}\n", cc, idx));
-    }
-    let _ = std::fs::write(midi_map_path(), s);
-}
-
-/// A held note's identity — keyboard notes key by char (survives octave changes), MIDI by note number.
-#[derive(PartialEq, Eq, Hash, Clone, Copy)]
-enum NoteId {
-    Kbd(char),
-    Midi(u8),
-}
-
-/// Clickable regions captured during render, used by the mouse handler.
-#[derive(Default)]
-struct Hits {
-    params: Vec<(Param, Rect)>, // each slider row's rect
-    presets: Option<Rect>,      // the presets line
-}
-
-// ---------- application state (UI thread) ----------
 struct App {
-    sequencer: Sequencer, // frontend; pushing notes is the lock-free bridge to audio
-    net: Net,             // frontend; kept for live reverb crossfades + keeps the backend alive
-    reverb_id: NodeId,
-    // audio-thread mirrors of the live params (written each frame from the base values below)
-    cutoff_sh: Shared,
-    reso_sh: Shared,
+    sequencer: Sequencer,
+    _net: Net,
     drive_sh: Shared,
-    chorus_sh: Shared,
-    delay_sh: Shared,
-    dfeed_sh: Shared,
-    eq1k_sh: Shared,
-    reverb_sh: Shared,
     vol_sh: Shared,
-    comp_sh: Shared,
-    hiss_sh: Shared,
-    pitch_mod: Shared, // live global pitch multiplier (~1.0); chaos bends held notes through it
-    quant: Shared,     // output bit-depth quantization levels (read in the audio callback)
+    quant: Shared,
     bits_idx: usize,
-    // base (user-set) values — chaos perturbs these on the way to the shareds / new notes
-    cutoff: f32,
-    resonance: f32,
-    reverb_amt: f32,
-    volume: f32,
-    room: f32,
-    time: f32,
-    diffusion: f32,
-    wave: Wave,
-    attack: f32,
-    decay: f32,
-    sustain: f32,
-    release: f32,
-    drift: f32,
-    detune: f32,  // unison detune spread (analog thickness)
-    sub: f32,     // sub-oscillator level (square, two octaves down)
-    noise: f32,
-    hiss: f32,    // constant background noise floor
-    drive: f32,   // mid saturator dry/wet (0 = clean)
-    chorus: f32,  // chorus dry/wet (0 = clean)
-    delay: f32,   // strange delay dry/wet (0 = clean)
-    dfeed: f32,   // strange delay feedback (repeats)
-    eq1k: f32,    // 1 kHz EQ dip depth (0 = flat)
-    comp: f32,    // output compression amount (drive into the limiter)
-    fenv: f32,    // filter envelope amount (cutoff sweep on each note)
-    fdecay: f32,  // filter envelope decay time (s)
-    last_note: f32, // time of the most recent note-on, for the filter envelope
-    chaos: f32,   // global instability: continuous wander + per-note variation
-    octave: i32,
-    selected: Param,
-    active: HashMap<NoteId, (EventId, Shared)>, // held notes -> (sequencer event, gate)
-    seed: u64,                                  // per-voice drift seed source
-    rng: u64,                                   // per-note chaos RNG state
-    clock: Instant,                             // for continuous wander
-    presets: [Option<Preset>; 9],
-    toast: Option<String>, // transient "saved/loaded preset N" notification
-    toast_until: f32,
-    hold: Option<(usize, f32)>, // (preset slot, press time) — release before threshold = load, hold = save
-    midi_channel: u8, // 0 = Omni, 1..=16
+    drums: [DrumParams; 3],
+    selected_drum: usize,
+    selected_param: usize, // 0..3 drum params, 4 drive, 5 bits, 6 volume
+    flash: [f32; 3],       // time of last hit per drum, for UI feedback
+    midi_channel: u8,
     midi_port: String,
-    cc_map: HashMap<u8, Param>, // CC number -> bound param (MIDI learn)
-    learn_armed: bool,          // next CC binds to the selected param
-    last_midi: Option<String>,  // last received MIDI message, for the UI
-    hits: RefCell<Hits>,        // mouse hit-test regions, refreshed each render
-    supports_release: bool,
+    last_midi: Option<String>,
+    clock: Instant,
 }
+
+const NUM_PARAMS: usize = 7;
 
 impl App {
-    fn start_note(&mut self, id: NoteId, base_hz: f32, vel: f32) {
-        if self.active.contains_key(&id) {
-            return;
-        }
-        let (hz, a, d, s, r, drift, noise, seed) = self.voice_params(base_hz);
-        let (voice, gate) = make_voice(
-            self.wave, hz, vel, a, d, s, r, drift, self.detune, self.sub, noise, &self.pitch_mod,
-            seed,
-        );
-        let evid = self
-            .sequencer
-            .push_relative(0.0, f64::INFINITY, Fade::Smooth, 0.004, 0.01, voice);
-        self.active.insert(id, (evid, gate));
-    }
-
-    fn stop_note(&mut self, id: NoteId) {
-        if let Some((evid, gate)) = self.active.remove(&id) {
-            gate.set_value(-1.0); // start the ADSR release
-            let tail = self.release as f64 + 0.1;
-            self.sequencer.edit_relative(evid, tail, 0.05); // remove voice after the tail
-        }
-    }
-
-    /// Fallback for terminals without key-release reporting: a fixed-length note.
-    fn play_fixed(&mut self, base_hz: f32, vel: f32) {
-        let (hz, a, d, s, r, drift, noise, seed) = self.voice_params(base_hz);
-        let (voice, _gate) = make_voice(
-            self.wave, hz, vel, a, d, s, r, drift, self.detune, self.sub, noise, &self.pitch_mod,
-            seed,
-        );
-        let len = (a + d + 0.4 + r) as f64;
+    fn trigger(&mut self, drum: usize, vel: f32) {
+        self.selected_drum = drum;
+        self.flash[drum] = self.clock.elapsed().as_secs_f32();
+        let p = self.drums[drum];
+        let voice = build_drum(drum, p, vel);
+        let len = drum_length(drum, &p);
         self.sequencer
-            .push_relative(0.0, len, Fade::Smooth, 0.004, r as f64, voice);
-    }
-
-    /// Per-note voice parameters, with chaos applied as random per-note variation.
-    /// `base_hz` is the note's nominal frequency; chaos detune is applied here.
-    /// Returns (hz, attack, decay, sustain, release, drift_amt, noise_amt, seed).
-    #[allow(clippy::type_complexity)]
-    fn voice_params(&mut self, base_hz: f32) -> (f32, f32, f32, f32, f32, f32, f32, u64) {
-        self.last_note = self.clock.elapsed().as_secs_f32(); // retrigger the filter envelope
-        let c = self.chaos;
-        let a = (self.attack * (1.0 + 0.3 * c * self.rnd())).clamp(0.001, 2.0);
-        let d = (self.decay * (1.0 + 0.3 * c * self.rnd())).clamp(0.001, 2.0);
-        let s = (self.sustain + 0.1 * c * self.rnd()).clamp(0.0, 1.0);
-        let r = (self.release * (1.0 + 0.3 * c * self.rnd())).clamp(0.001, 3.0);
-        let drift = (self.drift + 0.3 * c * self.rnd().abs()).clamp(0.0, 1.0) * 0.015;
-        let noise = (self.noise + 0.2 * c * self.rnd().abs()).clamp(0.0, 1.0) * 0.5;
-        let detune = 1.0 + 0.015 * c * self.rnd(); // up to ~+/-25 cents of broken tuning
-        let hz = base_hz * detune;
-        (hz, a, d, s, r, drift, noise, self.next_seed())
-    }
-
-    /// Apply an incoming MIDI message (channel-filtered): notes, or CC -> param (with learn).
-    fn handle_midi(&mut self, msg: MidiMsg) {
-        let ch_ok = |ch: u8| self.midi_channel == 0 || self.midi_channel == ch + 1;
-        match msg {
-            MidiMsg::NoteOn { ch, note, vel } if ch_ok(ch) => {
-                self.last_midi = Some(format!("note {} v{}", note, vel));
-                if vel == 0 {
-                    self.stop_note(NoteId::Midi(note));
-                } else {
-                    let g = vel as f32 / 127.0 * 0.3; // map velocity to per-voice gain
-                    self.start_note(NoteId::Midi(note), midi_hz(note as f32), g);
-                }
-            }
-            MidiMsg::NoteOff { ch, note } if ch_ok(ch) => {
-                self.last_midi = Some(format!("off {}", note));
-                self.stop_note(NoteId::Midi(note));
-            }
-            MidiMsg::Cc { ch, cc, value } if ch_ok(ch) => {
-                self.last_midi = Some(format!("CC{} {}", cc, value));
-                if self.learn_armed {
-                    self.cc_map.insert(cc, self.selected);
-                    self.learn_armed = false;
-                    save_cc_map(&self.cc_map);
-                    self.set_toast(format!("CC{} → {}", cc, self.selected.name()));
-                } else if let Some(&p) = self.cc_map.get(&cc) {
-                    self.set_param_norm(p, value as f32 / 127.0);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// Set a param from a normalised 0..1 value (used by MIDI CC, absolute control).
-    fn set_param_norm(&mut self, p: Param, norm: f32) {
-        let n = norm.clamp(0.0, 1.0);
-        match p {
-            Param::Attack => self.attack = 0.001 + n * 1.999,
-            Param::Decay => self.decay = 0.001 + n * 1.999,
-            Param::Sustain => self.sustain = n,
-            Param::Release => self.release = 0.001 + n * 2.999,
-            Param::Drift => self.drift = n,
-            Param::Detune => self.detune = n,
-            Param::Sub => self.sub = n,
-            Param::Noise => self.noise = n,
-            Param::Hiss => self.hiss = n,
-            Param::Cutoff => self.cutoff = 20.0 * 1000.0_f32.powf(n), // log 20..20000
-            Param::Resonance => self.resonance = n * 0.98,
-            Param::FEnv => self.fenv = n,
-            Param::FDecay => self.fdecay = 0.02 + n * 1.98,
-            Param::Drive => self.drive = n,
-            Param::Chorus => self.chorus = n,
-            Param::Delay => self.delay = n,
-            Param::DFeed => self.dfeed = n * 0.9,
-            Param::RevAmount => self.reverb_amt = n,
-            Param::RevRoom => {
-                let v = 10.0 + n * 20.0;
-                if (v - self.room).abs() > 1.0 {
-                    self.room = v;
-                    self.rebuild_reverb();
-                }
-            }
-            Param::RevTime => {
-                let v = 0.5 + n * 9.5;
-                if (v - self.time).abs() > 0.5 {
-                    self.time = v;
-                    self.rebuild_reverb();
-                }
-            }
-            Param::RevDiffusion => {
-                let v = n;
-                if (v - self.diffusion).abs() > 0.05 {
-                    self.diffusion = v;
-                    self.rebuild_reverb();
-                }
-            }
-            Param::Eq1k => self.eq1k = n,
-            Param::Volume => self.volume = n,
-            Param::Comp => self.comp = n,
-            Param::Bits => {
-                self.bits_idx = (n * (BIT_OPTIONS.len() - 1) as f32).round() as usize;
-                self.quant.set_value(BIT_OPTIONS[self.bits_idx].1);
-            }
-            Param::Chaos => self.chaos = n,
-        }
-    }
-
-    fn cycle_midi_channel(&mut self, d: i32) {
-        self.midi_channel = (self.midi_channel as i32 + d).rem_euclid(17) as u8;
+            .push_relative(0.0, len, Fade::Smooth, 0.001, 0.02, voice);
     }
 
     fn adjust(&mut self, d: i32) {
-        let d = d as f32;
-        match self.selected {
-            Param::Attack => self.attack = (self.attack + d * 0.02).clamp(0.001, 2.0),
-            Param::Decay => self.decay = (self.decay + d * 0.02).clamp(0.001, 2.0),
-            Param::Sustain => self.sustain = (self.sustain + d * 0.05).clamp(0.0, 1.0),
-            Param::Release => self.release = (self.release + d * 0.05).clamp(0.001, 3.0),
-            Param::Drift => self.drift = (self.drift + d * 0.05).clamp(0.0, 1.0),
-            Param::Detune => self.detune = (self.detune + d * 0.05).clamp(0.0, 1.0),
-            Param::Sub => self.sub = (self.sub + d * 0.05).clamp(0.0, 1.0),
-            Param::Noise => self.noise = (self.noise + d * 0.05).clamp(0.0, 1.0),
-            Param::Hiss => self.hiss = (self.hiss + d * 0.05).clamp(0.0, 1.0),
-            Param::Cutoff => {
-                let factor = if d > 0.0 { 1.25 } else { 1.0 / 1.25 };
-                self.cutoff = (self.cutoff * factor).clamp(20.0, 20000.0);
+        let step = d as f32 * 0.05;
+        let i = self.selected_drum;
+        match self.selected_param {
+            0 => self.drums[i].tune = (self.drums[i].tune + step).clamp(0.0, 1.0),
+            1 => self.drums[i].decay = (self.drums[i].decay + step).clamp(0.0, 1.0),
+            2 => self.drums[i].fm = (self.drums[i].fm + step).clamp(0.0, 1.0),
+            3 => self.drums[i].snap = (self.drums[i].snap + step).clamp(0.0, 1.0),
+            4 => {
+                let v = (self.drive_sh.value() + step).clamp(0.0, 1.0);
+                self.drive_sh.set_value(v);
             }
-            Param::Resonance => self.resonance = (self.resonance + d * 0.05).clamp(0.0, 0.98),
-            Param::FEnv => self.fenv = (self.fenv + d * 0.05).clamp(0.0, 1.0),
-            Param::FDecay => self.fdecay = (self.fdecay + d * 0.05).clamp(0.02, 2.0),
-            Param::Drive => self.drive = (self.drive + d * 0.05).clamp(0.0, 1.0),
-            Param::Chorus => self.chorus = (self.chorus + d * 0.05).clamp(0.0, 1.0),
-            Param::Delay => self.delay = (self.delay + d * 0.05).clamp(0.0, 1.0),
-            Param::DFeed => self.dfeed = (self.dfeed + d * 0.05).clamp(0.0, 0.9),
-            Param::RevAmount => self.reverb_amt = (self.reverb_amt + d * 0.05).clamp(0.0, 1.0),
-            Param::RevRoom => {
-                self.room = (self.room + d).clamp(10.0, 30.0);
-                self.rebuild_reverb();
-            }
-            Param::RevTime => {
-                self.time = (self.time + d * 0.25).clamp(0.5, 10.0);
-                self.rebuild_reverb();
-            }
-            Param::RevDiffusion => {
-                self.diffusion = (self.diffusion + d * 0.05).clamp(0.0, 1.0);
-                self.rebuild_reverb();
-            }
-            Param::Eq1k => self.eq1k = (self.eq1k + d * 0.05).clamp(0.0, 1.0),
-            Param::Volume => self.volume = (self.volume + d * 0.05).clamp(0.0, 1.0),
-            Param::Comp => self.comp = (self.comp + d * 0.05).clamp(0.0, 1.0),
-            Param::Bits => {
+            5 => {
                 let n = BIT_OPTIONS.len() as i32;
-                self.bits_idx = ((self.bits_idx as i32 + d as i32).rem_euclid(n)) as usize;
+                self.bits_idx = ((self.bits_idx as i32 + d).rem_euclid(n)) as usize;
                 self.quant.set_value(BIT_OPTIONS[self.bits_idx].1);
             }
-            Param::Chaos => self.chaos = (self.chaos + d * 0.05).clamp(0.0, 1.0),
-        }
-    }
-
-    /// Push base params (plus continuous chaos wander) to the audio-thread shareds. Called every
-    /// UI frame. Each live param wanders on its own slow, seeded noise so they drift independently.
-    fn tick_chaos(&mut self, t: f32) {
-        let c = self.chaos;
-        let w = |seed: u64, rate: f32| spline_noise::<f32>(seed, t * rate);
-        // Filter envelope: fast attack on note-on, exponential decay back to the base cutoff.
-        let fenv = if self.fenv > 0.0 {
-            let dt = (t - self.last_note).max(0.0);
-            self.fenv * 9000.0 * (-dt / self.fdecay.max(0.01)).exp()
-        } else {
-            0.0
-        };
-        let cutoff = ((self.cutoff + fenv) * (1.0 + 0.35 * c * w(0x01, 0.8))).clamp(20.0, 20000.0);
-        let reso = (self.resonance + 0.15 * c * w(0x02, 0.5)).clamp(0.0, 0.98);
-        let reverb = (self.reverb_amt + 0.15 * c * w(0x03, 0.3)).clamp(0.0, 1.0);
-        let vol = (self.volume + 0.12 * c * w(0x04, 1.1)).clamp(0.0, 1.0);
-        let drive = (self.drive + 0.1 * c * w(0x07, 0.6)).clamp(0.0, 1.0);
-        // Pitch wander: a couple of detuned noise layers so held notes warble like sick tape.
-        let pitch_mod = 1.0 + 0.02 * c * (0.7 * w(0x05, 1.3) + 0.3 * w(0x06, 4.0));
-        self.cutoff_sh.set_value(cutoff);
-        self.reso_sh.set_value(reso);
-        self.drive_sh.set_value(drive);
-        self.chorus_sh.set_value(self.chorus);
-        self.delay_sh.set_value(self.delay);
-        self.dfeed_sh.set_value(self.dfeed);
-        self.eq1k_sh.set_value(self.eq1k);
-        self.reverb_sh.set_value(reverb);
-        self.vol_sh.set_value(vol);
-        self.comp_sh.set_value(1.0 + 3.0 * self.comp); // pre-gain into the limiter
-        self.hiss_sh.set_value(self.hiss * 0.03); // subtle noise floor
-        self.pitch_mod.set_value(pitch_mod);
-    }
-
-    /// Crossfade in a freshly built reverb node (room/time/diffusion changed the delay structure).
-    fn rebuild_reverb(&mut self) {
-        let unit = create_reverb(self.room, self.time, self.diffusion);
-        self.net.crossfade(self.reverb_id, Fade::Smooth, 0.5, unit);
-        self.net.commit();
-    }
-
-    fn next_seed(&mut self) -> u64 {
-        self.seed = self.seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        self.seed
-    }
-
-    /// xorshift64 -> uniform in [-1, 1).
-    fn rnd(&mut self) -> f32 {
-        let mut x = self.rng;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.rng = x;
-        ((x >> 40) as f32 / (1u64 << 24) as f32) * 2.0 - 1.0
-    }
-
-    fn capture(&self) -> Preset {
-        Preset {
-            wave: Wave::ALL.iter().position(|w| *w == self.wave).unwrap_or(0),
-            octave: self.octave,
-            attack: self.attack,
-            decay: self.decay,
-            sustain: self.sustain,
-            release: self.release,
-            drift: self.drift,
-            noise: self.noise,
-            cutoff: self.cutoff,
-            resonance: self.resonance,
-            reverb_amt: self.reverb_amt,
-            volume: self.volume,
-            room: self.room,
-            time: self.time,
-            diffusion: self.diffusion,
-            chaos: self.chaos,
-            drive: self.drive,
-            comp: self.comp,
-            hiss: self.hiss,
-            fenv: self.fenv,
-            fdecay: self.fdecay,
-            delay: self.delay,
-            dfeed: self.dfeed,
-            detune: self.detune,
-            eq1k: self.eq1k,
-            sub: self.sub,
-            chorus: self.chorus,
-            bits_idx: self.bits_idx,
-        }
-    }
-
-    fn apply(&mut self, p: Preset) {
-        self.wave = Wave::ALL[std::cmp::min(p.wave, Wave::ALL.len() - 1)];
-        self.octave = p.octave;
-        self.attack = p.attack;
-        self.decay = p.decay;
-        self.sustain = p.sustain;
-        self.release = p.release;
-        self.drift = p.drift;
-        self.noise = p.noise;
-        self.cutoff = p.cutoff;
-        self.resonance = p.resonance;
-        self.reverb_amt = p.reverb_amt;
-        self.volume = p.volume;
-        self.room = p.room;
-        self.time = p.time;
-        self.diffusion = p.diffusion;
-        self.chaos = p.chaos;
-        self.drive = p.drive;
-        self.comp = p.comp;
-        self.hiss = p.hiss;
-        self.fenv = p.fenv;
-        self.fdecay = p.fdecay;
-        self.delay = p.delay;
-        self.dfeed = p.dfeed;
-        self.detune = p.detune;
-        self.eq1k = p.eq1k;
-        self.sub = p.sub;
-        self.chorus = p.chorus;
-        self.bits_idx = std::cmp::min(p.bits_idx, BIT_OPTIONS.len() - 1);
-        self.quant.set_value(BIT_OPTIONS[self.bits_idx].1);
-        self.rebuild_reverb(); // room/time/diffusion may have changed
-    }
-
-    fn save_preset(&mut self, slot: usize) {
-        self.presets[slot] = Some(self.capture());
-        save_presets(&self.presets);
-        self.set_toast(format!("✓ saved preset {}", slot + 1));
-    }
-
-    fn load_preset(&mut self, slot: usize) {
-        match self.presets[slot] {
-            Some(p) => {
-                self.apply(p);
-                self.set_toast(format!("→ loaded preset {}", slot + 1));
+            _ => {
+                let v = (self.vol_sh.value() + step).clamp(0.0, 1.0);
+                self.vol_sh.set_value(v);
             }
-            None => self.set_toast(format!("preset {} empty", slot + 1)),
         }
     }
 
-    fn set_toast(&mut self, msg: String) {
-        self.toast = Some(msg);
-        self.toast_until = self.clock.elapsed().as_secs_f32() + 1.6;
+    fn handle_midi(&mut self, msg: MidiMsg) {
+        let MidiMsg::NoteOn { ch, note, vel } = msg;
+        if self.midi_channel != 0 && self.midi_channel != ch + 1 {
+            return;
+        }
+        self.last_midi = Some(format!("note {note} v{vel}"));
+        if vel == 0 {
+            return;
+        }
+        if let Some(drum) = drum_for_semitone(note as i32) {
+            self.trigger(drum, vel as f32 / 127.0);
+        }
     }
 }
 
-/// Returns true when the app should quit.
+/// Returns true to quit.
 fn handle_key(app: &mut App, k: KeyEvent) -> bool {
+    if k.kind != KeyEventKind::Press {
+        return false;
+    }
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-    match k.kind {
-        KeyEventKind::Press => match k.code {
-            KeyCode::Esc => return true,
-            KeyCode::Char('c') if ctrl => return true,
-            KeyCode::Tab => app.selected = app.selected.step(1),
-            KeyCode::BackTab => app.selected = app.selected.step(-1),
-            KeyCode::Up => app.adjust(1),
-            KeyCode::Down => app.adjust(-1),
-            KeyCode::Left => app.wave = app.wave.step(-1),
-            KeyCode::Right => app.wave = app.wave.step(1),
-            KeyCode::Char(',') => app.octave = std::cmp::max(app.octave - 1, -3),
-            KeyCode::Char('.') => app.octave = std::cmp::min(app.octave + 1, 3),
-            KeyCode::Char('m') => app.cycle_midi_channel(1),
-            KeyCode::Char('M') => app.cycle_midi_channel(-1),
-            KeyCode::Enter => {
-                app.learn_armed = !app.learn_armed;
-                if app.learn_armed {
-                    app.set_toast(format!("MIDI learn: send a CC for {}", app.selected.name()));
-                }
-            }
-            KeyCode::Char(c @ '1'..='9') => {
-                let slot = c as usize - '1' as usize;
-                if app.supports_release {
-                    // tap (release before threshold) = load; hold = save (handled in the loop)
-                    app.hold = Some((slot, app.clock.elapsed().as_secs_f32()));
-                } else if ctrl {
-                    app.save_preset(slot); // fallback: no key-release -> Ctrl saves
-                } else {
-                    app.load_preset(slot); // fallback: tap loads
-                }
-            }
-            KeyCode::Char(c) => {
-                if let Some(st) = key_to_semitone(c) {
-                    let hz = midi_hz((60 + st + 12 * app.octave) as f32);
-                    if app.supports_release {
-                        app.start_note(NoteId::Kbd(c), hz, VEL);
-                    } else {
-                        app.play_fixed(hz, VEL);
-                    }
-                }
-            }
-            _ => {}
-        },
-        KeyEventKind::Repeat => match k.code {
-            KeyCode::Up => app.adjust(1),
-            KeyCode::Down => app.adjust(-1),
-            _ => {}
-        },
-        KeyEventKind::Release => {
-            if let KeyCode::Char(c) = k.code {
-                if ('1'..='9').contains(&c) {
-                    let slot = c as usize - '1' as usize;
-                    if let Some((s, _)) = app.hold {
-                        if s == slot {
-                            app.hold = None;
-                            app.load_preset(slot); // released before threshold = short tap = load
-                        }
-                    }
-                } else if key_to_semitone(c).is_some() {
-                    app.stop_note(NoteId::Kbd(c));
-                }
-            }
-        }
-    }
-    false
-}
-
-/// Find the slider row under the cursor (from the last render's hit regions).
-fn param_at(app: &App, col: u16, row: u16) -> Option<(Param, Rect)> {
-    app.hits
-        .borrow()
-        .params
-        .iter()
-        .find(|(_, r)| col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height)
-        .copied()
-}
-
-/// Find the preset slot under the cursor on the presets line.
-fn preset_at(app: &App, col: u16, row: u16) -> Option<usize> {
-    let r = app.hits.borrow().presets?;
-    if row != r.y {
-        return None;
-    }
-    let start = r.x + 9; // " PRESETS " is 9 columns
-    if col < start {
-        return None;
-    }
-    let idx = ((col - start) / 2) as usize; // each slot is "N " = 2 columns
-    (idx < 9).then_some(idx)
-}
-
-fn handle_mouse(app: &mut App, me: MouseEvent) {
-    let (col, row) = (me.column, me.row);
-    match me.kind {
-        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-            let d = if matches!(me.kind, MouseEventKind::ScrollUp) {
-                1
-            } else {
-                -1
-            };
-            if let Some((p, _)) = param_at(app, col, row) {
-                app.selected = p; // scroll over a slider targets it
-            }
-            app.adjust(d);
-        }
-        MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left) => {
-            if let Some(slot) = preset_at(app, col, row) {
-                if matches!(me.kind, MouseEventKind::Down(_)) {
-                    app.load_preset(slot); // click a preset = load (hold-on-keyboard still saves)
-                }
-            } else if let Some((p, r)) = param_at(app, col, row) {
-                app.selected = p;
-                let bar_x = r.x + 8; // 8-column label, then a 16-wide bar
-                if col >= bar_x {
-                    let norm = (col - bar_x) as f32 / 16.0;
-                    app.set_param_norm(p, norm.clamp(0.0, 1.0)); // absolute slider set
+    match k.code {
+        KeyCode::Esc => return true,
+        KeyCode::Char('c') if ctrl => return true,
+        KeyCode::Tab => app.selected_param = (app.selected_param + 1) % NUM_PARAMS,
+        KeyCode::BackTab => app.selected_param = (app.selected_param + NUM_PARAMS - 1) % NUM_PARAMS,
+        KeyCode::Up => app.adjust(1),
+        KeyCode::Down => app.adjust(-1),
+        KeyCode::Char('m') => app.midi_channel = (app.midi_channel as i32 + 1).rem_euclid(17) as u8,
+        KeyCode::Char(c @ '1'..='3') => app.selected_drum = c as usize - '1' as usize,
+        KeyCode::Char(c) => {
+            if let Some(st) = key_to_semitone(c) {
+                if let Some(drum) = drum_for_semitone(st) {
+                    app.trigger(drum, 0.9);
                 }
             }
         }
         _ => {}
     }
+    false
 }
 
 // ---------- rendering ----------
@@ -1176,8 +340,8 @@ fn bar(ratio: f32, width: usize) -> String {
     s
 }
 
-fn param_row(name: &str, value: String, ratio: f32, selected: bool) -> Line<'static> {
-    let (label_style, val_style) = if selected {
+fn slider(name: &str, value: String, ratio: f32, selected: bool) -> Line<'static> {
+    let (label, val) = if selected {
         (
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             Style::default().fg(ACCENT),
@@ -1185,65 +349,23 @@ fn param_row(name: &str, value: String, ratio: f32, selected: bool) -> Line<'sta
     } else {
         (Style::default().fg(IDLE), Style::default().fg(DIM))
     };
-    let bar_style = Style::default().fg(if selected { ACCENT } else { DIM });
     Line::from(vec![
-        Span::styled(format!(" {:<7}", name), label_style),
-        Span::styled(bar(ratio, 16), bar_style),
-        Span::styled(format!(" {}", value), val_style),
+        Span::styled(format!(" {:<8}", name), label),
+        Span::styled(bar(ratio, 20), Style::default().fg(if selected { ACCENT } else { DIM })),
+        Span::styled(format!(" {}", value), val),
     ])
-}
-
-/// Build one styled keyboard row from a grid of (column, char, active) cells.
-fn key_line(slots: &[(usize, char, bool)], width: usize) -> Line<'static> {
-    let mut grid = vec![(' ', false); width];
-    for &(col, ch, active) in slots {
-        if col < width {
-            grid[col] = (ch, active);
-        }
-    }
-    let spans = grid
-        .into_iter()
-        .map(|(ch, active)| {
-            let style = if ch == ' ' {
-                Style::default()
-            } else if active {
-                Style::default()
-                    .fg(BG)
-                    .bg(ACCENT)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(IDLE)
-            };
-            Span::styled(ch.to_string(), style)
-        })
-        .collect::<Vec<_>>();
-    Line::from(spans)
 }
 
 fn ui(f: &mut Frame, app: &App) {
     let area = f.area();
-    let mut title_spans = vec![
-        Span::styled(
-            " ♪ zygmunt ",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("· {} voices ", app.active.len()),
-            Style::default().fg(DIM),
-        ),
-    ];
-    if let Some(t) = &app.toast {
-        title_spans.push(Span::styled(
-            format!("· {} ", t),
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ));
-    }
-    let title = Line::from(title_spans);
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(DIM))
-        .title(title)
+        .title(Span::styled(
+            " ◆ zygdrum · FM drums ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ))
         .title_alignment(Alignment::Center)
         .style(Style::default().bg(BG));
     let inner = outer.inner(area);
@@ -1252,221 +374,87 @@ fn ui(f: &mut Frame, app: &App) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),  // [0] waveform + octave
-            Constraint::Length(1),  // [1] presets
-            Constraint::Length(1),  // [2] MIDI status
-            Constraint::Length(1),  // [3] separator
-            Constraint::Length(15), // [4] parameter columns (with section gaps)
-            Constraint::Length(1),  // [5] separator
-            Constraint::Length(2),  // [6] piano
-            Constraint::Min(1),     // [7] footer
+            Constraint::Length(1), // drum tabs
+            Constraint::Length(1), // midi
+            Constraint::Length(1), // separator
+            Constraint::Length(4), // drum params
+            Constraint::Length(1), // gap
+            Constraint::Length(3), // master params
+            Constraint::Length(1), // separator
+            Constraint::Min(1),    // footer
         ])
         .split(inner);
 
-    // horizontal separators between zones
+    // drum tabs
+    let now = app.clock.elapsed().as_secs_f32();
+    let mut tabs = vec![Span::styled(" DRUM ", Style::default().fg(DIM))];
+    for (i, name) in DRUMS.iter().enumerate() {
+        let hit = now - app.flash[i] < 0.12;
+        let st = if i == app.selected_drum {
+            Style::default().fg(BG).bg(ACCENT).add_modifier(Modifier::BOLD)
+        } else if hit {
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(IDLE)
+        };
+        let key = ['C', 'D', 'E'][i];
+        tabs.push(Span::styled(format!(" {name} ({key}) "), st));
+        tabs.push(Span::raw(" "));
+    }
+    f.render_widget(Paragraph::new(Line::from(tabs)), rows[0]);
+
+    // midi line
+    let ch = if app.midi_channel == 0 {
+        "Omni".to_string()
+    } else {
+        app.midi_channel.to_string()
+    };
+    let mut midi = vec![
+        Span::styled(" MIDI ", Style::default().fg(DIM)),
+        Span::styled(format!("ch:{ch} "), Style::default().fg(IDLE)),
+        Span::styled(format!("· {} ", app.midi_port), Style::default().fg(DIM)),
+    ];
+    if let Some(m) = &app.last_midi {
+        midi.push(Span::styled(format!("· {m}"), Style::default().fg(DIM)));
+    }
+    f.render_widget(Paragraph::new(Line::from(midi)), rows[1]);
+
     let rule = || {
         Block::default()
             .borders(Borders::TOP)
             .border_style(Style::default().fg(DIM))
     };
-    f.render_widget(rule(), rows[3]);
-    f.render_widget(rule(), rows[5]);
+    f.render_widget(rule(), rows[2]);
+    f.render_widget(rule(), rows[6]);
 
-    // --- row 0: waveform selector + octave ---
-    let head = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(0), Constraint::Length(10)])
-        .split(rows[0]);
-    let mut wave_spans = vec![Span::styled(" WAVE ", Style::default().fg(DIM))];
-    for w in Wave::ALL {
-        let st = if w == app.wave {
-            Style::default()
-                .fg(BG)
-                .bg(ACCENT)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(IDLE)
-        };
-        wave_spans.push(Span::styled(format!(" {} ", w.label()), st));
-        wave_spans.push(Span::raw(" "));
-    }
-    f.render_widget(Paragraph::new(Line::from(wave_spans)), head[0]);
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            format!("OCT {:+} ", app.octave),
-            Style::default().fg(IDLE),
-        )))
-        .alignment(Alignment::Right),
-        head[1],
-    );
-
-    // --- row 1: preset slots ---
-    let mut preset_spans = vec![Span::styled(" PRESETS ", Style::default().fg(DIM))];
-    for i in 0..9 {
-        let st = if app.presets[i].is_some() {
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(DIM)
-        };
-        preset_spans.push(Span::styled(format!("{} ", i + 1), st));
-    }
-    let preset_hint = match app.hold {
-        Some((slot, _)) => format!("  ◉ hold {} to save…", slot + 1),
-        None => "  tap load · hold to save".to_string(),
-    };
-    let hint_style = if app.hold.is_some() {
-        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(DIM)
-    };
-    preset_spans.push(Span::styled(preset_hint, hint_style));
-    f.render_widget(Paragraph::new(Line::from(preset_spans)), rows[1]);
-
-    // --- row 2: MIDI status ---
-    let ch_label = if app.midi_channel == 0 {
-        "Omni".to_string()
-    } else {
-        app.midi_channel.to_string()
-    };
-    let mut midi_spans = vec![
-        Span::styled(" MIDI ", Style::default().fg(DIM)),
-        Span::styled(format!("ch:{ch_label} "), Style::default().fg(IDLE)),
-        Span::styled(format!("· {} ", app.midi_port), Style::default().fg(DIM)),
+    // selected drum params
+    let dp = app.drums[app.selected_drum];
+    let sp = app.selected_param;
+    let pct = |v: f32| format!("{:.0}%", v * 100.0);
+    let drum_lines = vec![
+        slider("Tune", pct(dp.tune), dp.tune, sp == 0),
+        slider("Decay", pct(dp.decay), dp.decay, sp == 1),
+        slider("FM", pct(dp.fm), dp.fm, sp == 2),
+        slider("Snap", pct(dp.snap), dp.snap, sp == 3),
     ];
-    if app.learn_armed {
-        midi_spans.push(Span::styled(
-            format!("· ◉ LEARN {} (send a CC) ", app.selected.name()),
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ));
-    } else {
-        midi_spans.push(Span::styled(
-            format!("· {} maps ", app.cc_map.len()),
-            Style::default().fg(DIM),
-        ));
-        if let Some(m) = &app.last_midi {
-            midi_spans.push(Span::styled(format!("· {m}"), Style::default().fg(DIM)));
-        }
-    }
-    f.render_widget(Paragraph::new(Line::from(midi_spans)), rows[2]);
+    f.render_widget(Paragraph::new(drum_lines), rows[3]);
 
-    // --- two parameter columns with a vertical divider ---
-    let mid = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(48),
-            Constraint::Length(3),
-            Constraint::Percentage(49),
-        ])
-        .split(rows[4]);
-    // vertical divider between the columns
-    let divider: Vec<Line> = (0..mid[1].height)
-        .map(|_| Line::from(Span::styled(" │", Style::default().fg(DIM))))
-        .collect();
-    f.render_widget(Paragraph::new(divider), mid[1]);
-
-    let (a, d, s, r) = (app.attack, app.decay, app.sustain, app.release);
-    // column A — oscillator + filter
-    let secs = |v: f32| format!("{:.0}ms", v * 1000.0);
-    let sel = |p: Param| app.selected == p;
-    let cutoff = app.cutoff;
-    let res = app.resonance;
-    let cutoff_ratio = (cutoff.max(20.0).ln() - 20f32.ln()) / (20000f32.ln() - 20f32.ln());
-    let pr = |name: &'static str, value: String, ratio: f32, p: Param| {
-        (Some(p), param_row(name, value, ratio, sel(p)))
-    };
-    let gap = || (None, Line::default());
-    // sections separated by blank lines: envelope · oscillator · filter
-    let col_a = vec![
-        pr("Attack", secs(a), a / 2.0, Param::Attack),
-        pr("Decay", secs(d), d / 2.0, Param::Decay),
-        pr("Sustain", format!("{:.0}%", s * 100.0), s, Param::Sustain),
-        pr("Release", secs(r), r / 3.0, Param::Release),
-        gap(),
-        pr("Drift", format!("{:.0}%", app.drift * 100.0), app.drift, Param::Drift),
-        pr("Detune", format!("{:.0}%", app.detune * 100.0), app.detune, Param::Detune),
-        pr("Sub", format!("{:.0}%", app.sub * 100.0), app.sub, Param::Sub),
-        pr("Noise", format!("{:.0}%", app.noise * 100.0), app.noise, Param::Noise),
-        pr("Hiss", format!("{:.0}%", app.hiss * 100.0), app.hiss, Param::Hiss),
-        gap(),
-        pr("Cutoff", format!("{:.0}Hz", cutoff), cutoff_ratio, Param::Cutoff),
-        pr("Reso", format!("{:.0}%", res / 0.98 * 100.0), res / 0.98, Param::Resonance),
-        pr("F.Env", format!("{:.0}%", app.fenv * 100.0), app.fenv, Param::FEnv),
-        pr("F.Decay", format!("{:.2}s", app.fdecay), app.fdecay / 2.0, Param::FDecay),
-    ];
-
-    // column B sections: drive/delay · reverb · output
-    let rv = app.reverb_amt;
-    let vol = app.volume;
-    let col_b = vec![
-        pr("Drive", format!("{:.0}%", app.drive * 100.0), app.drive, Param::Drive),
-        pr("Chorus", format!("{:.0}%", app.chorus * 100.0), app.chorus, Param::Chorus),
-        pr("Delay", format!("{:.0}%", app.delay * 100.0), app.delay, Param::Delay),
-        pr("D.Feed", format!("{:.0}%", app.dfeed / 0.9 * 100.0), app.dfeed / 0.9, Param::DFeed),
-        gap(),
-        pr("Reverb", format!("{:.0}%", rv * 100.0), rv, Param::RevAmount),
-        pr("Room", format!("{:.0}m", app.room), (app.room - 10.0) / 20.0, Param::RevRoom),
-        pr("Time", format!("{:.2}s", app.time), app.time / 10.0, Param::RevTime),
-        pr("Diffuse", format!("{:.0}%", app.diffusion * 100.0), app.diffusion, Param::RevDiffusion),
-        gap(),
-        pr("EQ 1k", format!("{:.0}%", app.eq1k * 100.0), app.eq1k, Param::Eq1k),
-        pr("Volume", format!("{:.0}%", vol * 100.0), vol, Param::Volume),
-        pr("Comp", format!("{:.0}%", app.comp * 100.0), app.comp, Param::Comp),
-        pr(
+    // master params
+    let drive = app.drive_sh.value();
+    let vol = app.vol_sh.value();
+    let master = vec![
+        slider("Drive", pct(drive), drive, sp == 4),
+        slider(
             "Bits",
             BIT_OPTIONS[app.bits_idx].0.to_string(),
             app.bits_idx as f32 / (BIT_OPTIONS.len() - 1) as f32,
-            Param::Bits,
+            sp == 5,
         ),
-        pr("Chaos", format!("{:.0}%", app.chaos * 100.0), app.chaos, Param::Chaos),
+        slider("Volume", pct(vol), vol, sp == 6),
     ];
+    f.render_widget(Paragraph::new(master), rows[5]);
 
-    // render each column and record clickable slider rows (gaps are skipped for hit-testing)
-    let mut hits = app.hits.borrow_mut();
-    hits.params.clear();
-    for (col, area) in [(col_a, mid[0]), (col_b, mid[2])] {
-        let mut lines = Vec::with_capacity(col.len());
-        for (i, (param, line)) in col.into_iter().enumerate() {
-            if let Some(p) = param {
-                hits.params
-                    .push((p, Rect::new(area.x, area.y + i as u16, area.width, 1)));
-            }
-            lines.push(line);
-        }
-        f.render_widget(Paragraph::new(lines), area);
-    }
-    hits.presets = Some(rows[1]);
-    drop(hits);
-
-    // --- piano ---
-    let act = |c: char| app.active.contains_key(&NoteId::Kbd(c));
-    let whites = [
-        (2usize, 'a', 'C'),
-        (6, 's', 'D'),
-        (10, 'd', 'E'),
-        (14, 'f', 'F'),
-        (18, 'g', 'G'),
-        (22, 'h', 'A'),
-        (26, 'j', 'B'),
-        (30, 'k', 'C'),
-    ];
-    let blacks = [(4usize, 'w'), (8, 'e'), (16, 't'), (20, 'y'), (24, 'u')];
-    let width = 33;
-    let black_slots: Vec<_> = blacks.iter().map(|&(c, ch)| (c, ch, act(ch))).collect();
-    let white_slots: Vec<_> = whites.iter().map(|&(c, ch, _)| (c, ch, act(ch))).collect();
-    let piano = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Length(1)])
-        .split(rows[6]);
-    f.render_widget(Paragraph::new(key_line(&black_slots, width)), piano[0]);
-    f.render_widget(Paragraph::new(key_line(&white_slots, width)), piano[1]);
-
-    // --- footer ---
-    let mut hint = String::from(
-        "Tab/click param · ↑↓/scroll adjust · drag slider · ←→ wave · ,. octave · m MIDI · Enter learn · 1-9 tap=load/hold=save · Esc quit",
-    );
-    if !app.supports_release {
-        hint.push_str("  (no key-release)");
-    }
+    let hint = "a/s/d (or any C/D/E) trigger · 1/2/3 select drum · Tab param · ↑↓ adjust · m MIDI · Esc quit";
     f.render_widget(
         Paragraph::new(Span::styled(hint, Style::default().fg(DIM))).alignment(Alignment::Center),
         rows[7],
@@ -1486,7 +474,6 @@ where
 {
     let channels = config.channels as usize;
     let mut next = move || backend.get_stereo();
-    // Bitcrush: round each sample to `levels` steps (0 = off). Cheap atomic read per frame.
     let crush = move |x: f32, levels: f32| {
         if levels >= 1.0 {
             (x * levels).round() / levels
@@ -1516,18 +503,13 @@ where
     Ok(stream)
 }
 
-fn restore_terminal(supports: bool) {
+fn restore_terminal() {
     let mut out = io::stdout();
-    if supports {
-        let _ = execute!(out, PopKeyboardEnhancementFlags);
-    }
-    let _ = execute!(out, DisableMouseCapture);
     let _ = execute!(out, LeaveAlternateScreen);
     let _ = disable_raw_mode();
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // --- audio setup ---
     let host = cpal::default_host();
     let device = host
         .default_output_device()
@@ -1538,41 +520,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sample_rate = config.sample_rate as f64;
 
     let mut sequencer = Sequencer::new(0, 1, ReplayMode::None);
-    sequencer.set_sample_rate(sample_rate); // tune pushed voices to the device rate
+    sequencer.set_sample_rate(sample_rate);
     let seq_backend = sequencer.backend();
 
-    let cutoff_sh = shared(8000.0);
-    let reso_sh = shared(0.2);
     let drive_sh = shared(0.0);
-    let chorus_sh = shared(0.0);
-    let delay_sh = shared(0.0);
-    let dfeed_sh = shared(0.35);
-    let eq1k_sh = shared(0.0);
-    let reverb_sh = shared(0.25);
     let vol_sh = shared(0.7);
-    let comp_sh = shared(1.0);
-    let hiss_sh = shared(0.0);
-    let pitch_mod = shared(1.0);
-    let quant = shared(0.0); // bit-depth off by default
-    let (room, time, diffusion) = (12.0_f32, 2.0_f32, 0.5_f32);
-    let (mut net, reverb_id) = build_net(
-        Box::new(seq_backend),
-        &cutoff_sh,
-        &reso_sh,
-        &drive_sh,
-        &chorus_sh,
-        &delay_sh,
-        &dfeed_sh,
-        &eq1k_sh,
-        &reverb_sh,
-        &vol_sh,
-        &comp_sh,
-        &hiss_sh,
-        room,
-        time,
-        diffusion,
-        sample_rate,
-    );
+    let quant = shared(0.0);
+    let mut net = build_net(Box::new(seq_backend), &drive_sh, &vol_sh, sample_rate);
     let backend = BlockRateAdapter::new(Box::new(net.backend()));
 
     let stream = match sample_format {
@@ -1583,141 +537,67 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     stream.play()?;
 
-    // --- MIDI input (kept alive for the program's lifetime) ---
     let (midi_tx, midi_rx) = std::sync::mpsc::channel::<MidiMsg>();
     let _midi_conn = setup_midi(midi_tx);
     let midi_port = _midi_conn
         .as_ref()
-        .map(|(_, name)| name.clone())
+        .map(|(_, n)| n.clone())
         .unwrap_or_else(|| "no device".into());
 
-    // --- terminal setup (Kitty keyboard protocol for true note-off) ---
-    let supports = supports_keyboard_enhancement().unwrap_or(false);
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    if supports {
-        execute!(
-            stdout,
-            PushKeyboardEnhancementFlags(
-                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
-            )
-        )?;
-    }
+    execute!(stdout, EnterAlternateScreen)?;
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        restore_terminal(supports);
+        restore_terminal();
         default_hook(info);
     }));
-
     let mut terminal: Terminal<CrosstermBackend<Stdout>> =
         Terminal::new(CrosstermBackend::new(stdout))?;
 
     let mut app = App {
         sequencer,
-        net,
-        reverb_id,
-        cutoff_sh,
-        reso_sh,
+        _net: net,
         drive_sh,
-        chorus_sh,
-        delay_sh,
-        dfeed_sh,
-        eq1k_sh,
-        reverb_sh,
         vol_sh,
-        comp_sh,
-        hiss_sh,
-        pitch_mod,
         quant,
         bits_idx: 0,
-        cutoff: 8000.0,
-        resonance: 0.2,
-        reverb_amt: 0.25,
-        volume: 0.7,
-        room,
-        time,
-        diffusion,
-        wave: Wave::Saw,
-        attack: 0.02,
-        decay: 0.15,
-        sustain: 0.6,
-        release: 0.3,
-        drift: 0.3,
-        detune: 0.25,
-        sub: 0.0,
-        noise: 0.0,
-        hiss: 0.0,
-        drive: 0.0,
-        chorus: 0.0,
-        delay: 0.0,
-        dfeed: 0.35,
-        eq1k: 0.0,
-        comp: 0.0,
-        fenv: 0.0,
-        fdecay: 0.3,
-        last_note: -1000.0,
-        chaos: 0.0,
-        octave: 0,
-        selected: Param::Attack,
-        active: HashMap::new(),
-        seed: 0,
-        rng: 0x853c_49e6_748f_ea9b,
-        clock: Instant::now(),
-        presets: load_presets(),
-        toast: None,
-        toast_until: 0.0,
-        hold: None,
+        drums: [
+            DrumParams { tune: 0.3, decay: 0.5, fm: 0.3, snap: 0.4 },
+            DrumParams { tune: 0.4, decay: 0.4, fm: 0.5, snap: 0.6 },
+            DrumParams { tune: 0.5, decay: 0.2, fm: 0.6, snap: 0.5 },
+        ],
+        selected_drum: 0,
+        selected_param: 0,
+        flash: [-1.0; 3],
         midi_channel: 0,
         midi_port,
-        cc_map: load_cc_map(),
-        learn_armed: false,
         last_midi: None,
-        hits: RefCell::new(Hits::default()),
-        supports_release: supports,
+        clock: Instant::now(),
     };
 
-    // --- event loop ---
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         let mut last_draw = -1.0f32;
         loop {
-            // drain MIDI promptly (low note latency); apply on the UI thread
             while let Ok(msg) = midi_rx.try_recv() {
                 app.handle_midi(msg);
             }
             let t = app.clock.elapsed().as_secs_f32();
-            app.tick_chaos(t);
-            if app.toast.is_some() && t > app.toast_until {
-                app.toast = None;
-            }
-            // hold a preset key past the threshold -> save (release before = load)
-            if let Some((slot, t0)) = app.hold {
-                if t - t0 >= 0.4 {
-                    app.save_preset(slot);
-                    app.hold = None;
-                }
-            }
             if t - last_draw >= 0.033 {
                 terminal.draw(|f| ui(f, &app))?;
                 last_draw = t;
             }
             if event::poll(Duration::from_millis(3))? {
-                match event::read()? {
-                    Event::Key(k) => {
-                        if handle_key(&mut app, k) {
-                            break;
-                        }
+                if let Event::Key(k) = event::read()? {
+                    if handle_key(&mut app, k) {
+                        break;
                     }
-                    Event::Mouse(me) => handle_mouse(&mut app, me),
-                    _ => {}
                 }
             }
         }
         Ok(())
     })();
 
-    restore_terminal(supports);
+    restore_terminal();
     result
 }
