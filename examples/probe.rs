@@ -27,8 +27,8 @@ fn main() {
     let volume = shared(0.5);
     let cutoff = shared(8000.0);
     let resonance = shared(0.2);
-    let drive = shared(0.5); // saturator engaged
-    let comp = shared(2.5); // compressor pre-gain engaged
+    let drive = shared(0.0); // clean
+    let comp = shared(1.0); // unity (no compression)
     let mut net = Net::wrap(Box::new(backend));
     net = net >> ((pass() | (var(&cutoff) >> follow(0.01)) | var(&resonance)) >> moog());
     net = net >> pan(0.0);
@@ -40,7 +40,7 @@ fn main() {
         >> ((1.0 - var(&drive) >> follow(0.01) >> split::<U2>()) * multipass::<U2>()
             & (var(&drive) >> follow(0.01) >> split::<U2>()) * (sat_l | sat_r));
     // strange delay (feedback) engaged
-    let delay_mix = shared(0.6);
+    let delay_mix = shared(0.0);
     let dfeed = shared(0.7);
     let dl = (pass() | lfo(|t: f64| 0.33 * (1.0 + 0.06 * spline_noise::<f64>(11, t * 0.7))))
         >> tap_linear(0.02, 1.2);
@@ -65,13 +65,16 @@ fn main() {
         >> limiter_stereo(0.005, 0.1);
     net.set_sample_rate(sr);
 
-    let g2 = shared(0.0);
-    let mut v: Box<dyn AudioUnit> =
-        Box::new((constant(440.0) >> saw()) * (var(&g2) >> adsr_live(0.02, 0.15, 0.6, 0.3)) * 0.5);
-    v.allocate();
-    v.get_mono();
-    g2.set_value(1.0);
-    seq.push_relative(0.0, f64::INFINITY, Fade::Smooth, 0.004, 0.01, v);
+    // 6-note chord at the real per-voice gain (VEL 0.22) to check polyphony headroom
+    for f in [261.6f32, 329.6, 392.0, 523.3, 659.3, 784.0] {
+        let g = shared(0.0);
+        let mut v: Box<dyn AudioUnit> =
+            Box::new((constant(f) >> saw()) * (var(&g) >> adsr_live(0.02, 0.15, 0.6, 0.3)) * 0.22);
+        v.allocate();
+        v.get_mono();
+        g.set_value(1.0);
+        seq.push_relative(0.0, f64::INFINITY, Fade::Smooth, 0.004, 0.01, v);
+    }
 
     let mut adapter = BlockRateAdapter::new(Box::new(net.backend()));
     let mut maxs = 0f32;
@@ -83,5 +86,5 @@ fn main() {
         }
         maxs = maxs.max(l.abs());
     }
-    println!("full path peak   = {maxs:.4}  (3s w/ delay+fb, nan={any_nan})");
+    println!("full path peak   = {maxs:.4}  (6-voice chord, default chain, nan={any_nan})");
 }

@@ -47,7 +47,9 @@ const IDLE: Color = Color::Rgb(165, 170, 185);
 const DIM: Color = Color::Rgb(95, 98, 120);
 const BG: Color = Color::Rgb(18, 18, 26);
 
-const VEL: f32 = 0.5;
+/// Per-voice gain. Voices sum in the sequencer, so this is kept low to leave headroom for chords
+/// (the master limiter then only needs to catch the occasional transient, not constant overshoot).
+const VEL: f32 = 0.22;
 
 /// Output bit-depth options: (label, quantization levels). 0.0 = off (full float).
 /// levels = 2^(bits-1); the callback rounds each sample to `levels` steps.
@@ -91,6 +93,7 @@ enum Param {
     Sustain,
     Release,
     Drift,
+    Detune,
     Noise,
     Hiss,
     Cutoff,
@@ -110,12 +113,13 @@ enum Param {
     Chaos,
 }
 impl Param {
-    const ALL: [Param; 22] = [
+    const ALL: [Param; 23] = [
         Param::Attack,
         Param::Decay,
         Param::Sustain,
         Param::Release,
         Param::Drift,
+        Param::Detune,
         Param::Noise,
         Param::Hiss,
         Param::Cutoff,
@@ -158,22 +162,47 @@ fn build_voice(
     s: f32,
     r: f32,
     drift: f32,
+    detune: f32,
     noise_amt: f32,
     pitch_mod: &Shared,
     seed: u64,
 ) -> Box<dyn AudioUnit> {
-    // Pitch = per-voice drift wander * a live global pitch-mod (chaos bends held notes in real time).
-    // prelude64's lfo passes time as f64, so keep the wander math in f64.
-    let (hz, drift) = (hz as f64, drift as f64);
-    let pm = pitch_mod.clone();
-    let pitch = lfo(move |t| hz * (1.0 + drift * spline_noise(seed, t * 3.0)) * pm.value() as f64);
+    // Three detuned oscillators per voice, each wandering on its own drift noise (analog-style
+    // unison: the copies beat against each other so the tone moves instead of sitting still).
+    // Pitch = drift wander * global pitch-mod (chaos bends held notes live). prelude64 lfo time is f64.
+    let (hz, drift, det) = (hz as f64, drift as f64, detune as f64 * 0.02);
+    let (pm0, pm1, pm2) = (pitch_mod.clone(), pitch_mod.clone(), pitch_mod.clone());
+    let p0 = lfo(move |t| hz * (1.0 + drift * spline_noise(seed, t * 3.0)) * pm0.value() as f64);
+    let p1 = lfo(move |t| {
+        hz * (1.0 + det) * (1.0 + drift * spline_noise(seed ^ 0xA1, t * 2.7)) * pm1.value() as f64
+    });
+    let p2 = lfo(move |t| {
+        hz * (1.0 - det) * (1.0 + drift * spline_noise(seed ^ 0xB2, t * 3.3)) * pm2.value() as f64
+    });
     let env = var(gate) >> adsr_live(a, d, s, r);
-    // oscillator + white noise, then shaped by the envelope and velocity
+    // unison osc sum (normalised) + white noise, shaped by the envelope and velocity
     match wave {
-        Wave::Sine => Box::new(((pitch >> sine()) + noise() * noise_amt) * env * vel),
-        Wave::Saw => Box::new(((pitch >> saw()) + noise() * noise_amt) * env * vel),
-        Wave::Square => Box::new(((pitch >> square()) + noise() * noise_amt) * env * vel),
-        Wave::Triangle => Box::new(((pitch >> triangle()) + noise() * noise_amt) * env * vel),
+        Wave::Sine => Box::new(
+            (((p0 >> sine()) + (p1 >> sine()) + (p2 >> sine())) * 0.33 + noise() * noise_amt)
+                * env
+                * vel,
+        ),
+        Wave::Saw => Box::new(
+            (((p0 >> saw()) + (p1 >> saw()) + (p2 >> saw())) * 0.33 + noise() * noise_amt)
+                * env
+                * vel,
+        ),
+        Wave::Square => Box::new(
+            (((p0 >> square()) + (p1 >> square()) + (p2 >> square())) * 0.33 + noise() * noise_amt)
+                * env
+                * vel,
+        ),
+        Wave::Triangle => Box::new(
+            (((p0 >> triangle()) + (p1 >> triangle()) + (p2 >> triangle())) * 0.33
+                + noise() * noise_amt)
+                * env
+                * vel,
+        ),
     }
 }
 
@@ -189,12 +218,14 @@ fn make_voice(
     s: f32,
     r: f32,
     drift: f32,
+    detune: f32,
     noise_amt: f32,
     pitch_mod: &Shared,
     seed: u64,
 ) -> (Box<dyn AudioUnit>, Shared) {
     let gate = shared(0.0);
-    let mut voice = build_voice(wave, hz, VEL, &gate, a, d, s, r, drift, noise_amt, pitch_mod, seed);
+    let mut voice =
+        build_voice(wave, hz, VEL, &gate, a, d, s, r, drift, detune, noise_amt, pitch_mod, seed);
     voice.allocate();
     voice.get_mono(); // observe gate<=0 once
     gate.set_value(1.0);
@@ -342,23 +373,24 @@ struct Preset {
     fdecay: f32,
     delay: f32,
     dfeed: f32,
+    detune: f32,
     bits_idx: usize,
 }
 
 impl Preset {
     fn to_line(&self) -> String {
         format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             self.wave, self.octave, self.attack, self.decay, self.sustain, self.release,
             self.drift, self.noise, self.cutoff, self.resonance, self.reverb_amt, self.volume,
             self.room, self.time, self.diffusion, self.chaos, self.bits_idx, self.drive, self.comp,
-            self.hiss, self.fenv, self.fdecay, self.delay, self.dfeed,
+            self.hiss, self.fenv, self.fdecay, self.delay, self.dfeed, self.detune,
         )
     }
 
     fn from_line(s: &str) -> Option<Preset> {
         let p: Vec<&str> = s.split(',').collect();
-        if p.len() != 24 {
+        if p.len() != 25 {
             return None;
         }
         Some(Preset {
@@ -386,6 +418,7 @@ impl Preset {
             fdecay: p[21].parse().ok()?,
             delay: p[22].parse().ok()?,
             dfeed: p[23].parse().ok()?,
+            detune: p[24].parse().ok()?,
         })
     }
 }
@@ -451,6 +484,7 @@ struct App {
     sustain: f32,
     release: f32,
     drift: f32,
+    detune: f32,  // unison detune spread (analog thickness)
     noise: f32,
     hiss: f32,    // constant background noise floor
     drive: f32,   // mid saturator dry/wet (0 = clean)
@@ -479,8 +513,9 @@ impl App {
             return;
         }
         let (hz, a, d, s, r, drift, noise, seed) = self.voice_params(semitone);
-        let (voice, gate) =
-            make_voice(self.wave, hz, a, d, s, r, drift, noise, &self.pitch_mod, seed);
+        let (voice, gate) = make_voice(
+            self.wave, hz, a, d, s, r, drift, self.detune, noise, &self.pitch_mod, seed,
+        );
         let id = self
             .sequencer
             .push_relative(0.0, f64::INFINITY, Fade::Smooth, 0.004, 0.01, voice);
@@ -498,8 +533,9 @@ impl App {
     /// Fallback for terminals without key-release reporting: a fixed-length note.
     fn play_fixed(&mut self, semitone: i32) {
         let (hz, a, d, s, r, drift, noise, seed) = self.voice_params(semitone);
-        let (voice, _gate) =
-            make_voice(self.wave, hz, a, d, s, r, drift, noise, &self.pitch_mod, seed);
+        let (voice, _gate) = make_voice(
+            self.wave, hz, a, d, s, r, drift, self.detune, noise, &self.pitch_mod, seed,
+        );
         let len = (a + d + 0.4 + r) as f64;
         self.sequencer
             .push_relative(0.0, len, Fade::Smooth, 0.004, r as f64, voice);
@@ -530,6 +566,7 @@ impl App {
             Param::Sustain => self.sustain = (self.sustain + d * 0.05).clamp(0.0, 1.0),
             Param::Release => self.release = (self.release + d * 0.05).clamp(0.001, 3.0),
             Param::Drift => self.drift = (self.drift + d * 0.05).clamp(0.0, 1.0),
+            Param::Detune => self.detune = (self.detune + d * 0.05).clamp(0.0, 1.0),
             Param::Noise => self.noise = (self.noise + d * 0.05).clamp(0.0, 1.0),
             Param::Hiss => self.hiss = (self.hiss + d * 0.05).clamp(0.0, 1.0),
             Param::Cutoff => {
@@ -644,6 +681,7 @@ impl App {
             fdecay: self.fdecay,
             delay: self.delay,
             dfeed: self.dfeed,
+            detune: self.detune,
             bits_idx: self.bits_idx,
         }
     }
@@ -672,6 +710,7 @@ impl App {
         self.fdecay = p.fdecay;
         self.delay = p.delay;
         self.dfeed = p.dfeed;
+        self.detune = p.detune;
         self.bits_idx = std::cmp::min(p.bits_idx, BIT_OPTIONS.len() - 1);
         self.quant.set_value(BIT_OPTIONS[self.bits_idx].1);
         self.rebuild_reverb(); // room/time/diffusion may have changed
@@ -841,7 +880,7 @@ fn ui(f: &mut Frame, app: &App) {
         .constraints([
             Constraint::Length(1), // [0] waveform + octave
             Constraint::Length(1), // [1] spacer
-            Constraint::Length(11), // [2] envelope curve + parameter columns
+            Constraint::Length(12), // [2] envelope curve + parameter columns
             Constraint::Length(1), // [3] spacer
             Constraint::Length(3), // [4] piano
             Constraint::Min(1),    // [5] footer
@@ -940,6 +979,7 @@ fn ui(f: &mut Frame, app: &App) {
         param_row("Sustain", format!("{:.0}%", s * 100.0), s, sel(Param::Sustain)),
         param_row("Release", secs(r), r / 3.0, sel(Param::Release)),
         param_row("Drift", format!("{:.0}%", app.drift * 100.0), app.drift, sel(Param::Drift)),
+        param_row("Detune", format!("{:.0}%", app.detune * 100.0), app.detune, sel(Param::Detune)),
         param_row("Noise", format!("{:.0}%", app.noise * 100.0), app.noise, sel(Param::Noise)),
         param_row("Hiss", format!("{:.0}%", app.hiss * 100.0), app.hiss, sel(Param::Hiss)),
         param_row("Cutoff", format!("{:.0}Hz", cutoff), cutoff_ratio, sel(Param::Cutoff)),
@@ -1087,7 +1127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let delay_sh = shared(0.0);
     let dfeed_sh = shared(0.35);
     let reverb_sh = shared(0.25);
-    let vol_sh = shared(0.5);
+    let vol_sh = shared(0.7);
     let comp_sh = shared(1.0);
     let hiss_sh = shared(0.0);
     let pitch_mod = shared(1.0);
@@ -1162,7 +1202,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cutoff: 8000.0,
         resonance: 0.2,
         reverb_amt: 0.25,
-        volume: 0.5,
+        volume: 0.7,
         room,
         time,
         diffusion,
@@ -1172,6 +1212,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sustain: 0.6,
         release: 0.3,
         drift: 0.3,
+        detune: 0.25,
         noise: 0.0,
         hiss: 0.0,
         drive: 0.0,
