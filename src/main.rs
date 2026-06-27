@@ -34,7 +34,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
-    Frame, Terminal,
+    Frame as RFrame, Terminal,
 };
 
 // ---------- palette ----------
@@ -47,9 +47,11 @@ const DRUMS: [&str; 3] = ["KICK", "SNARE", "HIHAT"];
 const PARAMS: [&str; 9] = [
     "Tune", "Ratio", "FM", "FMDec", "PEnv", "PDec", "Decay", "Snap", "Tone",
 ];
-const MASTER: [&str; 3] = ["Drive", "Bits", "Volume"];
+const MASTER: [&str; 5] = ["Drive", "Reverb", "Comp", "Bits", "Volume"];
 const NP: usize = 9; // params per drum
-const NROWS: usize = NP + 3; // selectable rows: 9 drum params + 3 master
+const NMASTER: usize = MASTER.len();
+const NROWS: usize = NP + NMASTER; // selectable rows: drum params + master
+const BITS_ID: usize = 27 + 3; // control id of the Bits (discrete) master param
 
 const BIT_OPTIONS: [(&str, f32); 6] = [
     ("off", 0.0),
@@ -113,14 +115,50 @@ fn key_to_semitone(c: char) -> Option<i32> {
 
 // ---------- master net ----------
 
-fn build_net(seq_backend: Box<dyn AudioUnit>, drive: &Shared, volume: &Shared, sr: f64) -> Net {
+/// Snappy feed-forward bus compressor (mono): envelope follower -> gain. Fast attack/release so
+/// transients poke through and the body pumps. `amount` (0..1, live) lowers threshold, raises
+/// ratio + makeup. Branch (^) sends the signal to both the passthrough and the detector.
+fn compressor(amount: &Shared) -> An<impl AudioNode<Inputs = U1, Outputs = U1>> {
+    let sh = amount.clone();
+    let detect = shape_fn(|x: f32| if x < 0.0 { -x } else { x }) >> afollow(0.002, 0.08);
+    (pass() ^ detect)
+        >> map(move |f: &Frame<f32, U2>| {
+            let a = sh.value();
+            let thresh = 0.5 - 0.4 * a;
+            let ratio = 1.0 + a * 8.0;
+            let makeup = 1.0 + a * 1.6;
+            let env = if f[1] < 1e-6 { 1e-6 } else { f[1] };
+            let g = if env > thresh {
+                (thresh / env).powf(1.0 - 1.0 / ratio)
+            } else {
+                1.0
+            };
+            f[0] * g * makeup
+        })
+}
+
+fn build_net(
+    seq_backend: Box<dyn AudioUnit>,
+    drive: &Shared,
+    reverb_amt: &Shared,
+    comp: &Shared,
+    volume: &Shared,
+    sr: f64,
+) -> Net {
     let mut net = Net::wrap(seq_backend);
     net = net >> pan(0.0);
+    // drive (dry/wet hard tanh)
     let dist = (pass() * 3.0 >> shape(Tanh(2.0))) | (pass() * 3.0 >> shape(Tanh(2.0)));
     net = net
         >> ((1.0 - var(drive) >> follow(0.01) >> split::<U2>()) * multipass::<U2>()
             & (var(drive) >> follow(0.01) >> split::<U2>()) * dist);
+    // room reverb (dry/wet)
+    let room = reverb2_stereo(14.0, 0.6, 0.5, 1.0, highshelf_hz(4000.0, 1.0, db_amp(-2.0)));
+    net = net
+        >> ((1.0 - var(reverb_amt) >> follow(0.01) >> split::<U2>()) * multipass::<U2>()
+            & (var(reverb_amt) >> follow(0.01) >> split::<U2>()) * room);
     net = net >> ((var(volume) >> follow(0.02) >> split::<U2>()) * multipass::<U2>());
+    net = net >> (compressor(comp) | compressor(comp)); // snappy bus comp
     net = net >> limiter_stereo(0.003, 0.1);
     net.set_sample_rate(sr);
     net
@@ -214,6 +252,8 @@ struct App {
     sequencer: Sequencer,
     _net: Net,
     drive_sh: Shared,
+    reverb_sh: Shared,
+    comp_sh: Shared,
     vol_sh: Shared,
     quant: Shared,
     bits_idx: usize,
@@ -248,7 +288,9 @@ impl App {
         } else {
             match id - 27 {
                 0 => self.drive_sh.value(),
-                1 => self.bits_idx as f32 / (BIT_OPTIONS.len() - 1) as f32,
+                1 => self.reverb_sh.value(),
+                2 => self.comp_sh.value(),
+                3 => self.bits_idx as f32 / (BIT_OPTIONS.len() - 1) as f32,
                 _ => self.vol_sh.value(),
             }
         }
@@ -261,7 +303,9 @@ impl App {
         } else {
             match id - 27 {
                 0 => self.drive_sh.set_value(n),
-                1 => {
+                1 => self.reverb_sh.set_value(n),
+                2 => self.comp_sh.set_value(n),
+                3 => {
                     self.bits_idx = (n * (BIT_OPTIONS.len() - 1) as f32).round() as usize;
                     self.quant.set_value(BIT_OPTIONS[self.bits_idx].1);
                 }
@@ -272,7 +316,7 @@ impl App {
 
     fn adjust(&mut self, d: i32) {
         let id = self.cur_id();
-        if id == 28 {
+        if id == BITS_ID {
             let n = BIT_OPTIONS.len() as i32;
             self.bits_idx = ((self.bits_idx as i32 + d).rem_euclid(n)) as usize;
             self.quant.set_value(BIT_OPTIONS[self.bits_idx].1);
@@ -396,7 +440,7 @@ fn handle_mouse(app: &mut App, me: MouseEvent) {
         MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left) => {
             if let Some((id, r)) = cell_at(app, col, row) {
                 select_id(app, id);
-                if id != 28 {
+                if id != BITS_ID {
                     let norm = (col.saturating_sub(r.x)) as f32 / std::cmp::max(r.width, 1) as f32;
                     app.set_norm(id, norm.clamp(0.0, 1.0));
                 }
@@ -429,7 +473,7 @@ fn cell_bar(ratio: f32, width: usize) -> String {
     s
 }
 
-fn ui(f: &mut Frame, app: &App) {
+fn ui(f: &mut RFrame, app: &App) {
     let area = f.area();
     let outer = Block::default()
         .borders(Borders::ALL)
@@ -447,7 +491,7 @@ fn ui(f: &mut Frame, app: &App) {
             Constraint::Length(1),  // [0] column headers
             Constraint::Length(NP as u16), // [1] matrix
             Constraint::Length(1),  // [2] separator
-            Constraint::Length(3),  // [3] master
+            Constraint::Length(NMASTER as u16), // [3] master
             Constraint::Length(1),  // [4] midi/learn
             Constraint::Length(1),  // [5] separator
             Constraint::Min(1),     // [6] footer
@@ -510,7 +554,7 @@ fn ui(f: &mut Frame, app: &App) {
     for (mi, mname) in MASTER.iter().enumerate() {
         let id = 27 + mi;
         let sel = app.sel_row == NP + mi;
-        let (valstr, ratio) = if mi == 1 {
+        let (valstr, ratio) = if mi == 3 {
             (BIT_OPTIONS[app.bits_idx].0.to_string(), app.bits_idx as f32 / (BIT_OPTIONS.len() - 1) as f32)
         } else {
             let v = app.control_norm(id);
@@ -605,9 +649,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let seq_backend = sequencer.backend();
 
     let drive_sh = shared(0.0);
+    let reverb_sh = shared(0.0);
+    let comp_sh = shared(0.0);
     let vol_sh = shared(0.7);
     let quant = shared(0.0);
-    let mut net = build_net(Box::new(seq_backend), &drive_sh, &vol_sh, sample_rate);
+    let mut net = build_net(
+        Box::new(seq_backend),
+        &drive_sh,
+        &reverb_sh,
+        &comp_sh,
+        &vol_sh,
+        sample_rate,
+    );
     let backend = BlockRateAdapter::new(Box::new(net.backend()));
 
     let stream = match sample_format {
@@ -643,6 +696,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sequencer,
         _net: net,
         drive_sh,
+        reverb_sh,
+        comp_sh,
         vol_sh,
         quant,
         bits_idx: 0,

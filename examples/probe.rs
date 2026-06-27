@@ -38,4 +38,22 @@ fn main() {
     peak("kick", [0.18, 0.10, 0.20, 0.70, 0.55, 0.65, 0.45, 0.10, 0.10]);
     peak("snare", [0.42, 0.25, 0.40, 0.60, 0.20, 0.70, 0.25, 0.70, 0.50]);
     peak("hihat", [0.72, 0.45, 0.60, 0.20, 0.00, 0.50, 0.12, 0.60, 0.80]);
+    // noise burst through the snappy compressor (amount 0.7)
+    let mut c = (noise() * 0.6) >> comp_node(0.7);
+    c.set_sample_rate(48000.0); c.allocate();
+    let (mut m, mut nan) = (0f32, false);
+    for _ in 0..24000 { let x = c.get_mono(); if !x.is_finite() { nan = true; } m = m.max(x.abs()); }
+    println!("kick>comp peak={m:.4} nan={nan}");
+}
+
+// ---- compressor sanity (appended) ----
+fn comp_node(amount: f64) -> An<impl AudioNode<Inputs = U1, Outputs = U1>> {
+    let detect = shape_fn(|x: f32| if x < 0.0 { -x } else { x }) >> afollow(0.002, 0.08);
+    (pass() ^ detect) >> map(move |f: &Frame<f32, U2>| {
+        let a = amount as f32;
+        let thresh = 0.5 - 0.4 * a; let ratio = 1.0 + a * 8.0; let makeup = 1.0 + a * 1.6;
+        let env = if f[1] < 1e-6 { 1e-6 } else { f[1] };
+        let g = if env > thresh { (thresh / env).powf(1.0 - 1.0 / ratio) } else { 1.0 };
+        f[0] * g * makeup
+    })
 }
