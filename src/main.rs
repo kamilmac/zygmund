@@ -103,6 +103,7 @@ enum Param {
     FEnv,
     FDecay,
     Drive,
+    Chorus,
     Delay,
     DFeed,
     RevAmount,
@@ -116,7 +117,7 @@ enum Param {
     Chaos,
 }
 impl Param {
-    const ALL: [Param; 25] = [
+    const ALL: [Param; 26] = [
         Param::Attack,
         Param::Decay,
         Param::Sustain,
@@ -131,6 +132,7 @@ impl Param {
         Param::FEnv,
         Param::FDecay,
         Param::Drive,
+        Param::Chorus,
         Param::Delay,
         Param::DFeed,
         Param::RevAmount,
@@ -164,6 +166,7 @@ impl Param {
             Param::FEnv => "F.Env",
             Param::FDecay => "F.Decay",
             Param::Drive => "Drive",
+            Param::Chorus => "Chorus",
             Param::Delay => "Delay",
             Param::DFeed => "D.Feed",
             Param::RevAmount => "Reverb",
@@ -220,9 +223,9 @@ fn build_voice(
     let p2 = lfo(move |t| {
         hz * (1.0 - det) * (1.0 + drift * spline_noise(seed, t * 3.0)) * pm2.value() as f64
     });
-    // Sub-oscillator: square wave one octave below, tracking the same pitch.
+    // Sub-oscillator: square wave two octaves below, tracking the same pitch.
     let sub = lfo(move |t| {
-        0.5 * hz * (1.0 + drift * spline_noise(seed, t * 3.0)) * pms.value() as f64
+        0.25 * hz * (1.0 + drift * spline_noise(seed, t * 3.0)) * pms.value() as f64
     });
     let sub_level = sub_level * 0.6; // map knob (0..1) to a musical sub amplitude
     let env = var(gate) >> adsr_live(a, d, s, r);
@@ -338,6 +341,7 @@ fn build_net(
     cutoff: &Shared,
     resonance: &Shared,
     drive: &Shared,
+    chorus_amt: &Shared,
     delay_mix: &Shared,
     dfeed: &Shared,
     eq1k: &Shared,
@@ -358,6 +362,11 @@ fn build_net(
     net = net
         >> ((1.0 - var(drive) >> follow(0.01) >> split::<U2>()) * multipass::<U2>()
             & (var(drive) >> follow(0.01) >> split::<U2>()) * saturator());
+    // Stereo chorus (two decorrelated voices), blended dry/wet by chorus_amt.
+    net = net
+        >> ((1.0 - var(chorus_amt) >> follow(0.01) >> split::<U2>()) * multipass::<U2>()
+            & (var(chorus_amt) >> follow(0.01) >> split::<U2>())
+                * (chorus(0, 0.015, 0.005, 0.5) | chorus(1, 0.015, 0.005, 0.5)));
     // Strange delay (before the reverb), blended dry/wet by delay_mix.
     net = net
         >> ((1.0 - var(delay_mix) >> follow(0.01) >> split::<U2>()) * multipass::<U2>()
@@ -438,24 +447,25 @@ struct Preset {
     detune: f32,
     eq1k: f32,
     sub: f32,
+    chorus: f32,
     bits_idx: usize,
 }
 
 impl Preset {
     fn to_line(&self) -> String {
         format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             self.wave, self.octave, self.attack, self.decay, self.sustain, self.release,
             self.drift, self.noise, self.cutoff, self.resonance, self.reverb_amt, self.volume,
             self.room, self.time, self.diffusion, self.chaos, self.bits_idx, self.drive, self.comp,
             self.hiss, self.fenv, self.fdecay, self.delay, self.dfeed, self.detune, self.eq1k,
-            self.sub,
+            self.sub, self.chorus,
         )
     }
 
     fn from_line(s: &str) -> Option<Preset> {
         let p: Vec<&str> = s.split(',').collect();
-        if p.len() != 27 {
+        if p.len() != 28 {
             return None;
         }
         Some(Preset {
@@ -486,6 +496,7 @@ impl Preset {
             detune: p[24].parse().ok()?,
             eq1k: p[25].parse().ok()?,
             sub: p[26].parse().ok()?,
+            chorus: p[27].parse().ok()?,
         })
     }
 }
@@ -632,6 +643,7 @@ struct App {
     cutoff_sh: Shared,
     reso_sh: Shared,
     drive_sh: Shared,
+    chorus_sh: Shared,
     delay_sh: Shared,
     dfeed_sh: Shared,
     eq1k_sh: Shared,
@@ -657,10 +669,11 @@ struct App {
     release: f32,
     drift: f32,
     detune: f32,  // unison detune spread (analog thickness)
-    sub: f32,     // sub-oscillator level (square, one octave down)
+    sub: f32,     // sub-oscillator level (square, two octaves down)
     noise: f32,
     hiss: f32,    // constant background noise floor
     drive: f32,   // mid saturator dry/wet (0 = clean)
+    chorus: f32,  // chorus dry/wet (0 = clean)
     delay: f32,   // strange delay dry/wet (0 = clean)
     dfeed: f32,   // strange delay feedback (repeats)
     eq1k: f32,    // 1 kHz EQ dip depth (0 = flat)
@@ -792,6 +805,7 @@ impl App {
             Param::FEnv => self.fenv = n,
             Param::FDecay => self.fdecay = 0.02 + n * 1.98,
             Param::Drive => self.drive = n,
+            Param::Chorus => self.chorus = n,
             Param::Delay => self.delay = n,
             Param::DFeed => self.dfeed = n * 0.9,
             Param::RevAmount => self.reverb_amt = n,
@@ -851,6 +865,7 @@ impl App {
             Param::FEnv => self.fenv = (self.fenv + d * 0.05).clamp(0.0, 1.0),
             Param::FDecay => self.fdecay = (self.fdecay + d * 0.05).clamp(0.02, 2.0),
             Param::Drive => self.drive = (self.drive + d * 0.05).clamp(0.0, 1.0),
+            Param::Chorus => self.chorus = (self.chorus + d * 0.05).clamp(0.0, 1.0),
             Param::Delay => self.delay = (self.delay + d * 0.05).clamp(0.0, 1.0),
             Param::DFeed => self.dfeed = (self.dfeed + d * 0.05).clamp(0.0, 0.9),
             Param::RevAmount => self.reverb_amt = (self.reverb_amt + d * 0.05).clamp(0.0, 1.0),
@@ -900,6 +915,7 @@ impl App {
         self.cutoff_sh.set_value(cutoff);
         self.reso_sh.set_value(reso);
         self.drive_sh.set_value(drive);
+        self.chorus_sh.set_value(self.chorus);
         self.delay_sh.set_value(self.delay);
         self.dfeed_sh.set_value(self.dfeed);
         self.eq1k_sh.set_value(self.eq1k);
@@ -960,6 +976,7 @@ impl App {
             detune: self.detune,
             eq1k: self.eq1k,
             sub: self.sub,
+            chorus: self.chorus,
             bits_idx: self.bits_idx,
         }
     }
@@ -991,6 +1008,7 @@ impl App {
         self.detune = p.detune;
         self.eq1k = p.eq1k;
         self.sub = p.sub;
+        self.chorus = p.chorus;
         self.bits_idx = std::cmp::min(p.bits_idx, BIT_OPTIONS.len() - 1);
         self.quant.set_value(BIT_OPTIONS[self.bits_idx].1);
         self.rebuild_reverb(); // room/time/diffusion may have changed
@@ -1381,6 +1399,7 @@ fn ui(f: &mut Frame, app: &App) {
     let vol = app.volume;
     let col_b = vec![
         pr("Drive", format!("{:.0}%", app.drive * 100.0), app.drive, Param::Drive),
+        pr("Chorus", format!("{:.0}%", app.chorus * 100.0), app.chorus, Param::Chorus),
         pr("Delay", format!("{:.0}%", app.delay * 100.0), app.delay, Param::Delay),
         pr("D.Feed", format!("{:.0}%", app.dfeed / 0.9 * 100.0), app.dfeed / 0.9, Param::DFeed),
         gap(),
@@ -1525,6 +1544,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cutoff_sh = shared(8000.0);
     let reso_sh = shared(0.2);
     let drive_sh = shared(0.0);
+    let chorus_sh = shared(0.0);
     let delay_sh = shared(0.0);
     let dfeed_sh = shared(0.35);
     let eq1k_sh = shared(0.0);
@@ -1540,6 +1560,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &cutoff_sh,
         &reso_sh,
         &drive_sh,
+        &chorus_sh,
         &delay_sh,
         &dfeed_sh,
         &eq1k_sh,
@@ -1601,6 +1622,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cutoff_sh,
         reso_sh,
         drive_sh,
+        chorus_sh,
         delay_sh,
         dfeed_sh,
         eq1k_sh,
@@ -1629,6 +1651,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         noise: 0.0,
         hiss: 0.0,
         drive: 0.0,
+        chorus: 0.0,
         delay: 0.0,
         dfeed: 0.35,
         eq1k: 0.0,
