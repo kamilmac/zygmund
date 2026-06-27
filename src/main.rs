@@ -95,6 +95,7 @@ enum Param {
     Release,
     Drift,
     Detune,
+    Sub,
     Noise,
     Hiss,
     Cutoff,
@@ -115,13 +116,14 @@ enum Param {
     Chaos,
 }
 impl Param {
-    const ALL: [Param; 24] = [
+    const ALL: [Param; 25] = [
         Param::Attack,
         Param::Decay,
         Param::Sustain,
         Param::Release,
         Param::Drift,
         Param::Detune,
+        Param::Sub,
         Param::Noise,
         Param::Hiss,
         Param::Cutoff,
@@ -154,6 +156,7 @@ impl Param {
             Param::Release => "Release",
             Param::Drift => "Drift",
             Param::Detune => "Detune",
+            Param::Sub => "Sub",
             Param::Noise => "Noise",
             Param::Hiss => "Hiss",
             Param::Cutoff => "Cutoff",
@@ -182,7 +185,6 @@ impl Param {
 /// `drift` is the analog-style pitch instability (fraction of pitch); each voice gets its own
 /// `seed` so notes in a chord wander independently. ADSR + drift bake in at build time.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn build_voice(
     wave: Wave,
     hz: f32,
@@ -194,6 +196,7 @@ fn build_voice(
     r: f32,
     drift: f32,
     detune: f32,
+    sub_level: f32,
     noise_amt: f32,
     pitch_mod: &Shared,
     seed: u64,
@@ -202,7 +205,12 @@ fn build_voice(
     // unison: the copies beat against each other so the tone moves instead of sitting still).
     // Pitch = drift wander * global pitch-mod (chaos bends held notes live). prelude64 lfo time is f64.
     let (hz, drift, det) = (hz as f64, drift as f64, detune as f64 * 0.02);
-    let (pm0, pm1, pm2) = (pitch_mod.clone(), pitch_mod.clone(), pitch_mod.clone());
+    let (pm0, pm1, pm2, pms) = (
+        pitch_mod.clone(),
+        pitch_mod.clone(),
+        pitch_mod.clone(),
+        pitch_mod.clone(),
+    );
     // All three share the same drift wander (same seed/rate) so Detune is the ONLY thing that
     // spreads them. At Detune 0 they collapse onto one frequency -> a single oscillator.
     let p0 = lfo(move |t| hz * (1.0 + drift * spline_noise(seed, t * 3.0)) * pm0.value() as f64);
@@ -212,26 +220,38 @@ fn build_voice(
     let p2 = lfo(move |t| {
         hz * (1.0 - det) * (1.0 + drift * spline_noise(seed, t * 3.0)) * pm2.value() as f64
     });
+    // Sub-oscillator: square wave one octave below, tracking the same pitch.
+    let sub = lfo(move |t| {
+        0.5 * hz * (1.0 + drift * spline_noise(seed, t * 3.0)) * pms.value() as f64
+    });
+    let sub_level = sub_level * 0.6; // map knob (0..1) to a musical sub amplitude
     let env = var(gate) >> adsr_live(a, d, s, r);
-    // unison osc sum (normalised) + white noise, shaped by the envelope and velocity
+    // unison osc sum (normalised) + sub + white noise, shaped by the envelope and velocity
     match wave {
         Wave::Sine => Box::new(
-            (((p0 >> sine()) + (p1 >> sine()) + (p2 >> sine())) * 0.33 + noise() * noise_amt)
+            (((p0 >> sine()) + (p1 >> sine()) + (p2 >> sine())) * 0.33
+                + (sub >> square()) * sub_level
+                + noise() * noise_amt)
                 * env
                 * vel,
         ),
         Wave::Saw => Box::new(
-            (((p0 >> saw()) + (p1 >> saw()) + (p2 >> saw())) * 0.33 + noise() * noise_amt)
+            (((p0 >> saw()) + (p1 >> saw()) + (p2 >> saw())) * 0.33
+                + (sub >> square()) * sub_level
+                + noise() * noise_amt)
                 * env
                 * vel,
         ),
         Wave::Square => Box::new(
-            (((p0 >> square()) + (p1 >> square()) + (p2 >> square())) * 0.33 + noise() * noise_amt)
+            (((p0 >> square()) + (p1 >> square()) + (p2 >> square())) * 0.33
+                + (sub >> square()) * sub_level
+                + noise() * noise_amt)
                 * env
                 * vel,
         ),
         Wave::Triangle => Box::new(
             (((p0 >> triangle()) + (p1 >> triangle()) + (p2 >> triangle())) * 0.33
+                + (sub >> square()) * sub_level
                 + noise() * noise_amt)
                 * env
                 * vel,
@@ -253,13 +273,15 @@ fn make_voice(
     r: f32,
     drift: f32,
     detune: f32,
+    sub_level: f32,
     noise_amt: f32,
     pitch_mod: &Shared,
     seed: u64,
 ) -> (Box<dyn AudioUnit>, Shared) {
     let gate = shared(0.0);
-    let mut voice =
-        build_voice(wave, hz, vel, &gate, a, d, s, r, drift, detune, noise_amt, pitch_mod, seed);
+    let mut voice = build_voice(
+        wave, hz, vel, &gate, a, d, s, r, drift, detune, sub_level, noise_amt, pitch_mod, seed,
+    );
     voice.allocate();
     voice.get_mono(); // observe gate<=0 once
     gate.set_value(1.0);
@@ -415,23 +437,25 @@ struct Preset {
     dfeed: f32,
     detune: f32,
     eq1k: f32,
+    sub: f32,
     bits_idx: usize,
 }
 
 impl Preset {
     fn to_line(&self) -> String {
         format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             self.wave, self.octave, self.attack, self.decay, self.sustain, self.release,
             self.drift, self.noise, self.cutoff, self.resonance, self.reverb_amt, self.volume,
             self.room, self.time, self.diffusion, self.chaos, self.bits_idx, self.drive, self.comp,
             self.hiss, self.fenv, self.fdecay, self.delay, self.dfeed, self.detune, self.eq1k,
+            self.sub,
         )
     }
 
     fn from_line(s: &str) -> Option<Preset> {
         let p: Vec<&str> = s.split(',').collect();
-        if p.len() != 26 {
+        if p.len() != 27 {
             return None;
         }
         Some(Preset {
@@ -461,6 +485,7 @@ impl Preset {
             dfeed: p[23].parse().ok()?,
             detune: p[24].parse().ok()?,
             eq1k: p[25].parse().ok()?,
+            sub: p[26].parse().ok()?,
         })
     }
 }
@@ -632,6 +657,7 @@ struct App {
     release: f32,
     drift: f32,
     detune: f32,  // unison detune spread (analog thickness)
+    sub: f32,     // sub-oscillator level (square, one octave down)
     noise: f32,
     hiss: f32,    // constant background noise floor
     drive: f32,   // mid saturator dry/wet (0 = clean)
@@ -669,7 +695,8 @@ impl App {
         }
         let (hz, a, d, s, r, drift, noise, seed) = self.voice_params(base_hz);
         let (voice, gate) = make_voice(
-            self.wave, hz, vel, a, d, s, r, drift, self.detune, noise, &self.pitch_mod, seed,
+            self.wave, hz, vel, a, d, s, r, drift, self.detune, self.sub, noise, &self.pitch_mod,
+            seed,
         );
         let evid = self
             .sequencer
@@ -689,7 +716,8 @@ impl App {
     fn play_fixed(&mut self, base_hz: f32, vel: f32) {
         let (hz, a, d, s, r, drift, noise, seed) = self.voice_params(base_hz);
         let (voice, _gate) = make_voice(
-            self.wave, hz, vel, a, d, s, r, drift, self.detune, noise, &self.pitch_mod, seed,
+            self.wave, hz, vel, a, d, s, r, drift, self.detune, self.sub, noise, &self.pitch_mod,
+            seed,
         );
         let len = (a + d + 0.4 + r) as f64;
         self.sequencer
@@ -756,6 +784,7 @@ impl App {
             Param::Release => self.release = 0.001 + n * 2.999,
             Param::Drift => self.drift = n,
             Param::Detune => self.detune = n,
+            Param::Sub => self.sub = n,
             Param::Noise => self.noise = n,
             Param::Hiss => self.hiss = n,
             Param::Cutoff => self.cutoff = 20.0 * 1000.0_f32.powf(n), // log 20..20000
@@ -811,6 +840,7 @@ impl App {
             Param::Release => self.release = (self.release + d * 0.05).clamp(0.001, 3.0),
             Param::Drift => self.drift = (self.drift + d * 0.05).clamp(0.0, 1.0),
             Param::Detune => self.detune = (self.detune + d * 0.05).clamp(0.0, 1.0),
+            Param::Sub => self.sub = (self.sub + d * 0.05).clamp(0.0, 1.0),
             Param::Noise => self.noise = (self.noise + d * 0.05).clamp(0.0, 1.0),
             Param::Hiss => self.hiss = (self.hiss + d * 0.05).clamp(0.0, 1.0),
             Param::Cutoff => {
@@ -929,6 +959,7 @@ impl App {
             dfeed: self.dfeed,
             detune: self.detune,
             eq1k: self.eq1k,
+            sub: self.sub,
             bits_idx: self.bits_idx,
         }
     }
@@ -959,6 +990,7 @@ impl App {
         self.dfeed = p.dfeed;
         self.detune = p.detune;
         self.eq1k = p.eq1k;
+        self.sub = p.sub;
         self.bits_idx = std::cmp::min(p.bits_idx, BIT_OPTIONS.len() - 1);
         self.quant.set_value(BIT_OPTIONS[self.bits_idx].1);
         self.rebuild_reverb(); // room/time/diffusion may have changed
@@ -1206,7 +1238,7 @@ fn ui(f: &mut Frame, app: &App) {
             Constraint::Length(1),  // [1] presets
             Constraint::Length(1),  // [2] MIDI status
             Constraint::Length(1),  // [3] separator
-            Constraint::Length(14), // [4] parameter columns (with section gaps)
+            Constraint::Length(15), // [4] parameter columns (with section gaps)
             Constraint::Length(1),  // [5] separator
             Constraint::Length(2),  // [6] piano
             Constraint::Min(1),     // [7] footer
@@ -1334,6 +1366,7 @@ fn ui(f: &mut Frame, app: &App) {
         gap(),
         pr("Drift", format!("{:.0}%", app.drift * 100.0), app.drift, Param::Drift),
         pr("Detune", format!("{:.0}%", app.detune * 100.0), app.detune, Param::Detune),
+        pr("Sub", format!("{:.0}%", app.sub * 100.0), app.sub, Param::Sub),
         pr("Noise", format!("{:.0}%", app.noise * 100.0), app.noise, Param::Noise),
         pr("Hiss", format!("{:.0}%", app.hiss * 100.0), app.hiss, Param::Hiss),
         gap(),
@@ -1592,6 +1625,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         release: 0.3,
         drift: 0.3,
         detune: 0.25,
+        sub: 0.0,
         noise: 0.0,
         hiss: 0.0,
         drive: 0.0,
