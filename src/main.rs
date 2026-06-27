@@ -106,13 +106,14 @@ enum Param {
     RevRoom,
     RevTime,
     RevDiffusion,
+    Eq1k,
     Volume,
     Comp,
     Bits,
     Chaos,
 }
 impl Param {
-    const ALL: [Param; 23] = [
+    const ALL: [Param; 24] = [
         Param::Attack,
         Param::Decay,
         Param::Sustain,
@@ -132,6 +133,7 @@ impl Param {
         Param::RevRoom,
         Param::RevTime,
         Param::RevDiffusion,
+        Param::Eq1k,
         Param::Volume,
         Param::Comp,
         Param::Bits,
@@ -163,6 +165,7 @@ impl Param {
             Param::RevRoom => "Room",
             Param::RevTime => "Time",
             Param::RevDiffusion => "Diffuse",
+            Param::Eq1k => "EQ 1k",
             Param::Volume => "Volume",
             Param::Comp => "Comp",
             Param::Bits => "Bits",
@@ -198,12 +201,14 @@ fn build_voice(
     // Pitch = drift wander * global pitch-mod (chaos bends held notes live). prelude64 lfo time is f64.
     let (hz, drift, det) = (hz as f64, drift as f64, detune as f64 * 0.02);
     let (pm0, pm1, pm2) = (pitch_mod.clone(), pitch_mod.clone(), pitch_mod.clone());
+    // All three share the same drift wander (same seed/rate) so Detune is the ONLY thing that
+    // spreads them. At Detune 0 they collapse onto one frequency -> a single oscillator.
     let p0 = lfo(move |t| hz * (1.0 + drift * spline_noise(seed, t * 3.0)) * pm0.value() as f64);
     let p1 = lfo(move |t| {
-        hz * (1.0 + det) * (1.0 + drift * spline_noise(seed ^ 0xA1, t * 2.7)) * pm1.value() as f64
+        hz * (1.0 + det) * (1.0 + drift * spline_noise(seed, t * 3.0)) * pm1.value() as f64
     });
     let p2 = lfo(move |t| {
-        hz * (1.0 - det) * (1.0 + drift * spline_noise(seed ^ 0xB2, t * 3.3)) * pm2.value() as f64
+        hz * (1.0 - det) * (1.0 + drift * spline_noise(seed, t * 3.0)) * pm2.value() as f64
     });
     let env = var(gate) >> adsr_live(a, d, s, r);
     // unison osc sum (normalised) + white noise, shaped by the envelope and velocity
@@ -311,6 +316,7 @@ fn build_net(
     drive: &Shared,
     delay_mix: &Shared,
     dfeed: &Shared,
+    eq1k: &Shared,
     reverb_amt: &Shared,
     volume: &Shared,
     comp: &Shared,
@@ -336,6 +342,11 @@ fn build_net(
     net = net
         >> ((1.0 - var(reverb_amt) >> follow(0.01) >> split::<U2>()) * multipass::<U2>()
             & (var(reverb_amt) >> follow(0.01) >> split::<U2>()) * reverb);
+    // 1 kHz EQ dip: subtract a band from the dry signal (eq1k = depth). More bands can be added later.
+    net = net
+        >> (multipass::<U2>()
+            & ((-1.5 * var(eq1k) >> follow(0.02) >> split::<U2>())
+                * (bandpass_hz(1000.0, 1.0) | bandpass_hz(1000.0, 1.0))));
     net = net >> ((var(volume) >> follow(0.02) >> split::<U2>()) * multipass::<U2>());
     // Constant analog-style noise floor (pink, independent of note level) added to the bus.
     net = net
@@ -401,23 +412,24 @@ struct Preset {
     delay: f32,
     dfeed: f32,
     detune: f32,
+    eq1k: f32,
     bits_idx: usize,
 }
 
 impl Preset {
     fn to_line(&self) -> String {
         format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             self.wave, self.octave, self.attack, self.decay, self.sustain, self.release,
             self.drift, self.noise, self.cutoff, self.resonance, self.reverb_amt, self.volume,
             self.room, self.time, self.diffusion, self.chaos, self.bits_idx, self.drive, self.comp,
-            self.hiss, self.fenv, self.fdecay, self.delay, self.dfeed, self.detune,
+            self.hiss, self.fenv, self.fdecay, self.delay, self.dfeed, self.detune, self.eq1k,
         )
     }
 
     fn from_line(s: &str) -> Option<Preset> {
         let p: Vec<&str> = s.split(',').collect();
-        if p.len() != 25 {
+        if p.len() != 26 {
             return None;
         }
         Some(Preset {
@@ -446,6 +458,7 @@ impl Preset {
             delay: p[22].parse().ok()?,
             dfeed: p[23].parse().ok()?,
             detune: p[24].parse().ok()?,
+            eq1k: p[25].parse().ok()?,
         })
     }
 }
@@ -587,6 +600,7 @@ struct App {
     drive_sh: Shared,
     delay_sh: Shared,
     dfeed_sh: Shared,
+    eq1k_sh: Shared,
     reverb_sh: Shared,
     vol_sh: Shared,
     comp_sh: Shared,
@@ -614,6 +628,7 @@ struct App {
     drive: f32,   // mid saturator dry/wet (0 = clean)
     delay: f32,   // strange delay dry/wet (0 = clean)
     dfeed: f32,   // strange delay feedback (repeats)
+    eq1k: f32,    // 1 kHz EQ dip depth (0 = flat)
     comp: f32,    // output compression amount (drive into the limiter)
     fenv: f32,    // filter envelope amount (cutoff sweep on each note)
     fdecay: f32,  // filter envelope decay time (s)
@@ -628,6 +643,7 @@ struct App {
     presets: [Option<Preset>; 9],
     toast: Option<String>, // transient "saved/loaded preset N" notification
     toast_until: f32,
+    hold: Option<(usize, f32)>, // (preset slot, press time) — release before threshold = load, hold = save
     midi_channel: u8, // 0 = Omni, 1..=16
     midi_port: String,
     cc_map: HashMap<u8, Param>, // CC number -> bound param (MIDI learn)
@@ -761,6 +777,7 @@ impl App {
                     self.rebuild_reverb();
                 }
             }
+            Param::Eq1k => self.eq1k = n,
             Param::Volume => self.volume = n,
             Param::Comp => self.comp = n,
             Param::Bits => {
@@ -809,6 +826,7 @@ impl App {
                 self.diffusion = (self.diffusion + d * 0.05).clamp(0.0, 1.0);
                 self.rebuild_reverb();
             }
+            Param::Eq1k => self.eq1k = (self.eq1k + d * 0.05).clamp(0.0, 1.0),
             Param::Volume => self.volume = (self.volume + d * 0.05).clamp(0.0, 1.0),
             Param::Comp => self.comp = (self.comp + d * 0.05).clamp(0.0, 1.0),
             Param::Bits => {
@@ -844,6 +862,7 @@ impl App {
         self.drive_sh.set_value(drive);
         self.delay_sh.set_value(self.delay);
         self.dfeed_sh.set_value(self.dfeed);
+        self.eq1k_sh.set_value(self.eq1k);
         self.reverb_sh.set_value(reverb);
         self.vol_sh.set_value(vol);
         self.comp_sh.set_value(1.0 + 3.0 * self.comp); // pre-gain into the limiter
@@ -899,6 +918,7 @@ impl App {
             delay: self.delay,
             dfeed: self.dfeed,
             detune: self.detune,
+            eq1k: self.eq1k,
             bits_idx: self.bits_idx,
         }
     }
@@ -928,6 +948,7 @@ impl App {
         self.delay = p.delay;
         self.dfeed = p.dfeed;
         self.detune = p.detune;
+        self.eq1k = p.eq1k;
         self.bits_idx = std::cmp::min(p.bits_idx, BIT_OPTIONS.len() - 1);
         self.quant.set_value(BIT_OPTIONS[self.bits_idx].1);
         self.rebuild_reverb(); // room/time/diffusion may have changed
@@ -980,10 +1001,13 @@ fn handle_key(app: &mut App, k: KeyEvent) -> bool {
             }
             KeyCode::Char(c @ '1'..='9') => {
                 let slot = c as usize - '1' as usize;
-                if ctrl {
-                    app.load_preset(slot);
+                if app.supports_release {
+                    // tap (release before threshold) = load; hold = save (handled in the loop)
+                    app.hold = Some((slot, app.clock.elapsed().as_secs_f32()));
+                } else if ctrl {
+                    app.save_preset(slot); // fallback: no key-release -> Ctrl saves
                 } else {
-                    app.save_preset(slot);
+                    app.load_preset(slot); // fallback: tap loads
                 }
             }
             KeyCode::Char(c) => {
@@ -1005,7 +1029,15 @@ fn handle_key(app: &mut App, k: KeyEvent) -> bool {
         },
         KeyEventKind::Release => {
             if let KeyCode::Char(c) = k.code {
-                if key_to_semitone(c).is_some() {
+                if ('1'..='9').contains(&c) {
+                    let slot = c as usize - '1' as usize;
+                    if let Some((s, _)) = app.hold {
+                        if s == slot {
+                            app.hold = None;
+                            app.load_preset(slot); // released before threshold = short tap = load
+                        }
+                    }
+                } else if key_to_semitone(c).is_some() {
                     app.stop_note(NoteId::Kbd(c));
                 }
             }
@@ -1152,7 +1184,16 @@ fn ui(f: &mut Frame, app: &App) {
         };
         preset_spans.push(Span::styled(format!("{} ", i + 1), st));
     }
-    preset_spans.push(Span::styled("  tap save · Ctrl+# load", Style::default().fg(DIM)));
+    let preset_hint = match app.hold {
+        Some((slot, _)) => format!("  ◉ hold {} to save…", slot + 1),
+        None => "  tap load · hold to save".to_string(),
+    };
+    let hint_style = if app.hold.is_some() {
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(DIM)
+    };
+    preset_spans.push(Span::styled(preset_hint, hint_style));
     f.render_widget(Paragraph::new(Line::from(preset_spans)), rows[1]);
 
     // --- row 2: MIDI status ---
@@ -1222,6 +1263,7 @@ fn ui(f: &mut Frame, app: &App) {
         param_row("Room", format!("{:.0}m", app.room), (app.room - 10.0) / 20.0, sel(Param::RevRoom)),
         param_row("Time", format!("{:.2}s", app.time), app.time / 10.0, sel(Param::RevTime)),
         param_row("Diffuse", format!("{:.0}%", app.diffusion * 100.0), app.diffusion, sel(Param::RevDiffusion)),
+        param_row("EQ 1k", format!("{:.0}%", app.eq1k * 100.0), app.eq1k, sel(Param::Eq1k)),
         param_row("Volume", format!("{:.0}%", vol * 100.0), vol, sel(Param::Volume)),
         param_row("Comp", format!("{:.0}%", app.comp * 100.0), app.comp, sel(Param::Comp)),
         param_row(
@@ -1265,7 +1307,7 @@ fn ui(f: &mut Frame, app: &App) {
 
     // --- footer ---
     let mut hint = String::from(
-        "Tab param · ↑↓ adjust · ←→ wave · ,. octave · m MIDI ch · Enter learn · 1-9 preset · Esc quit",
+        "Tab param · ↑↓ adjust · ←→ wave · ,. octave · m MIDI · Enter learn · 1-9 tap=load/hold=save · Esc quit",
     );
     if !app.supports_release {
         hint.push_str("  (no key-release)");
@@ -1348,6 +1390,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let drive_sh = shared(0.0);
     let delay_sh = shared(0.0);
     let dfeed_sh = shared(0.35);
+    let eq1k_sh = shared(0.0);
     let reverb_sh = shared(0.25);
     let vol_sh = shared(0.7);
     let comp_sh = shared(1.0);
@@ -1362,6 +1405,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &drive_sh,
         &delay_sh,
         &dfeed_sh,
+        &eq1k_sh,
         &reverb_sh,
         &vol_sh,
         &comp_sh,
@@ -1422,6 +1466,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         drive_sh,
         delay_sh,
         dfeed_sh,
+        eq1k_sh,
         reverb_sh,
         vol_sh,
         comp_sh,
@@ -1448,6 +1493,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         drive: 0.0,
         delay: 0.0,
         dfeed: 0.35,
+        eq1k: 0.0,
         comp: 0.0,
         fenv: 0.0,
         fdecay: 0.3,
@@ -1462,6 +1508,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         presets: load_presets(),
         toast: None,
         toast_until: 0.0,
+        hold: None,
         midi_channel: 0,
         midi_port,
         cc_map: load_cc_map(),
@@ -1482,6 +1529,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             app.tick_chaos(t);
             if app.toast.is_some() && t > app.toast_until {
                 app.toast = None;
+            }
+            // hold a preset key past the threshold -> save (release before = load)
+            if let Some((slot, t0)) = app.hold {
+                if t - t0 >= 0.4 {
+                    app.save_preset(slot);
+                    app.hold = None;
+                }
             }
             if t - last_draw >= 0.033 {
                 terminal.draw(|f| ui(f, &app))?;
