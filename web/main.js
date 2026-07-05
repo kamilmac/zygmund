@@ -2,9 +2,9 @@
 // over its message port, and renders per-voice scopes via a main-thread wasm instance.
 import init, { capture_envelope, capture_spectrogram } from './pkg/zygfred_web.js';
 
-const PARAMS = ['Tune', 'Ratio', 'FM', 'FMDec', 'PEnv', 'PDec', 'Decay', 'Snap', 'Tone', 'Haas', 'Rand', 'Width', 'Vol'];
-const P_HAAS = 9;
-const P_RAND = 10;
+const PARAMS = ['Tune', 'Ratio', 'FM', 'FMDec', 'PEnv', 'PDec', 'Decay', 'Snap', 'Tone', 'Rand', 'Haas', 'Width', 'Vol'];
+const P_RAND = 9;
+const P_HAAS = 10;
 const P_WIDTH = 11; // 0 = mono (left take on both channels), 1 = full stereo (L take left, R take right)
 const P_VOL = 12; // per-voice gain, applied on the velocity path (voice amp is linear in vel)
 const DRUMS = [
@@ -23,9 +23,9 @@ const MASTER = [
   { name: 'Volume', msg: 'volume', value: 0.7 },
 ];
 const DEFAULTS = [
-  [0.18, 0.10, 0.20, 0.70, 0.55, 0.65, 0.45, 0.10, 0.10, 0.10, 0.15, 1.00, 1.00],
-  [0.42, 0.25, 0.40, 0.60, 0.20, 0.70, 0.25, 0.70, 0.50, 0.25, 0.35, 1.00, 1.00],
-  [0.72, 0.45, 0.60, 0.20, 0.00, 0.50, 0.12, 0.60, 0.80, 0.35, 0.40, 1.00, 1.00],
+  [0.18, 0.10, 0.20, 0.70, 0.55, 0.65, 0.45, 0.10, 0.10, 0.15, 0.10, 1.00, 1.00],
+  [0.42, 0.25, 0.40, 0.60, 0.20, 0.70, 0.25, 0.70, 0.50, 0.35, 0.25, 1.00, 1.00],
+  [0.72, 0.45, 0.60, 0.20, 0.00, 0.50, 0.12, 0.60, 0.80, 0.40, 0.35, 1.00, 1.00],
 ];
 // same trigger mapping as native: keys are semitones, pitch classes C/D/E hit kick/snare/hihat
 const KEY_SEMITONE = { a: 0, w: 1, s: 2, e: 3, d: 4, f: 5, t: 6, g: 7, y: 8, h: 9, u: 10, j: 11, k: 12 };
@@ -258,7 +258,7 @@ function buildVoice(drum) {
 
   for (let pi = 6; pi < PARAMS.length; pi++) {
     const row = paramRow(drum, pi);
-    if (pi === P_HAAS) row.classList.add('sect'); // body | stereo+gain
+    if (pi === P_RAND) row.classList.add('sect'); // body | rand+stereo+gain
     if (pi === P_RAND) randRows[drum] = row;
     panel.appendChild(row);
   }
@@ -446,6 +446,12 @@ const PRESET_HELP = 'hold to save \u00b7 click or 1\u20138 to load';
 const PRESET_SLOTS = 8;
 let presets = {};
 try { presets = JSON.parse(localStorage.getItem(PRESET_KEY) || '{}'); } catch { /* fresh */ }
+// v2: Rand moved above Haas (indices 9/10 swapped) — migrate presets saved before that
+if (localStorage.getItem('zygfred-presets-v') !== '2') {
+  Object.values(presets).forEach((st) => st.drums?.forEach((p) => { [p[9], p[10]] = [p[10], p[9]]; }));
+  localStorage.setItem(PRESET_KEY, JSON.stringify(presets));
+  localStorage.setItem('zygfred-presets-v', '2');
+}
 let currentSlot = null;
 const slotSyncs = [];
 let presetHintTimer = null;
