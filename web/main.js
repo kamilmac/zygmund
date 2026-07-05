@@ -439,11 +439,11 @@ function loadStateFromUrl() {
 
 const THEME_KEY = 'zygfred-theme';
 const THEME_DEFAULT = {
-  surface: '#141414',
+  surface: '#0a0a0a',
   accent: '#f0eeea', // master + chassis (title, power, learn)
-  kick: '#dba579',   // frequency register -> color temperature: low = warm
-  snare: '#b3c29a',
-  hihat: '#a8c7e0',
+  kick: '#a7db78',
+  snare: '#6b58bb',
+  hihat: '#d47a77',
 };
 const VOICE_KEYS = ['kick', 'snare', 'hihat'];
 
