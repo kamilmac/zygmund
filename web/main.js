@@ -48,7 +48,11 @@ function send(msg) {
 // incl. per-voice Vol), then master
 const controls = [];
 
-function makeBar({ id, name, getNorm, setNorm, getLabel, discreteSteps }) {
+function makeBar({ id, name, getNorm, setNorm: setNormRaw, getLabel, discreteSteps }) {
+  const setNorm = (n) => {
+    setNormRaw(n);
+    scheduleUrlSync(); // every state change flows through here (drag, wheel, CC)
+  };
   const bar = document.createElement('div');
   bar.className = 'bar';
   const fill = document.createElement('div');
@@ -369,6 +373,42 @@ function buildMidiStrip() {
   strip.append(tag, chSel, learnBtn, status);
 }
 
+// ---------- url state (the query string IS the patch: shareable, bookmarkable) ----------
+
+const URL_DRUM_KEYS = ['k', 's', 'h'];
+let urlTimer = null;
+
+function scheduleUrlSync() {
+  clearTimeout(urlTimer);
+  urlTimer = setTimeout(() => {
+    const q = new URLSearchParams();
+    const pct = (v) => Math.round(v * 100);
+    DRUMS.forEach((_, d) => q.set(URL_DRUM_KEYS[d], drums[d].map(pct).join('.')));
+    q.set('m', [pct(MASTER[0].value), pct(MASTER[1].value), pct(MASTER[2].value), bitsIdx, pct(MASTER[4].value)].join('.'));
+    history.replaceState(null, '', `${location.pathname}?${q}`);
+  }, 500);
+}
+
+function loadStateFromUrl() {
+  const q = new URLSearchParams(location.search);
+  DRUMS.forEach((_, d) => {
+    const raw = q.get(URL_DRUM_KEYS[d]);
+    if (!raw) return;
+    raw.split('.').forEach((s, i) => {
+      if (i < PARAMS.length && s !== '') drums[d][i] = clamp01((+s || 0) / 100);
+    });
+  });
+  const m = q.get('m');
+  if (m) {
+    const [drive, reverb, comp, bits, volume] = m.split('.').map(Number);
+    MASTER[0].value = clamp01((drive || 0) / 100);
+    MASTER[1].value = clamp01((reverb || 0) / 100);
+    MASTER[2].value = clamp01((comp || 0) / 100);
+    bitsIdx = Math.min(BIT_OPTIONS.length - 1, Math.max(0, Math.round(bits || 0)));
+    MASTER[4].value = clamp01((volume || 0) / 100);
+  }
+}
+
 // ---------- theme (dev modal: 2 base colors, every other shade derived) ----------
 
 const THEME_KEY = 'zygfred-theme';
@@ -451,7 +491,11 @@ async function powerOn() {
     node.port.onmessage = (e) => e.data.type === 'ready' && resolve();
   });
   node.connect(audioCtx.destination);
-  // engine defaults match DEFAULTS/MASTER; only volume is non-zero
+  // push full master state — the URL may have loaded a non-default patch
+  send({ type: 'drive', value: MASTER[0].value });
+  send({ type: 'reverb', value: MASTER[1].value });
+  send({ type: 'comp', value: MASTER[2].value });
+  send({ type: 'bits', value: BIT_OPTIONS[bitsIdx][1] });
   send({ type: 'volume', value: MASTER[4].value });
 
   $('#power').remove();
@@ -472,6 +516,7 @@ document.addEventListener('keydown', (e) => {
   if (drum !== undefined) trigger(drum);
 });
 
+loadStateFromUrl(); // before the UI builds, so bars render the loaded patch
 const voices = $('#voices');
 for (let d = 0; d < 3; d++) voices.appendChild(buildVoice(d));
 buildMaster();
