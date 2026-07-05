@@ -439,7 +439,7 @@ function loadStateFromUrl() {
 
 const THEME_KEY = 'zygfred-theme';
 const THEME_DEFAULT = {
-  surface: '#0a0a0a',
+  surface: '#0b0b0b',
   accent: '#f0eeea', // master + chassis (title, power, learn)
   kick: '#7dc9d1',
   snare: '#b8486d',
