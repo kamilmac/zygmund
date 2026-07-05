@@ -202,30 +202,6 @@
     cursor: pointer;
   }
   #dev-reset:hover { color: var(--idle); }
-  #power {
-    position: fixed;
-    inset: 0;
-    background: color-mix(in srgb, var(--bg) 95%, transparent);
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 18px;
-    z-index: 10;
-  }
-  #power button {
-    background: color-mix(in srgb, var(--accent) 9%, transparent);
-    border: none;
-    color: var(--accent);
-    font: inherit;
-    font-size: 15px;
-    font-weight: 700;
-    letter-spacing: 2px;
-    padding: 16px 42px;
-    cursor: pointer;
-  }
-  #power button:hover { background: color-mix(in srgb, var(--accent) 15%, transparent); }
-  #power .hint { color: var(--faint); }
 </style>
 </head>
 <body>
@@ -241,10 +217,6 @@
     <div class="dev-row"><span>hihat</span><input type="color" id="dev-hihat"></div>
     <div class="dev-row"><span>master</span><input type="color" id="dev-accent"></div>
     <button id="dev-reset">reset</button>
-  </div>
-  <div id="power">
-    <button>&#9670; power on</button>
-    <div class="hint">browsers need a click before audio can start</div>
   </div>
   <script type="module" src="./main.js"></script>
 </body>

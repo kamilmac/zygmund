@@ -392,7 +392,7 @@ function buildMidiStrip() {
 
   const status = document.createElement('span');
   status.className = 'status';
-  status.textContent = 'power on to enable';
+  status.textContent = 'click or play to enable';
 
   midiEls.learnBtn = learnBtn;
   midiEls.status = status;
@@ -514,8 +514,8 @@ function buildDevModal() {
 
 // ---------- boot ----------
 
-async function powerOn() {
-  audioCtx = new AudioContext();
+async function boot() {
+  audioCtx = new AudioContext(); // allowed pre-gesture; starts suspended, resumed by first input
   const bytes = await (await fetch('./pkg/zygfred_web_bg.wasm')).arrayBuffer();
   const module = await WebAssembly.compile(bytes);
   await init({ module_or_path: module }); // main-thread instance, scope rendering only
@@ -536,11 +536,21 @@ async function powerOn() {
   send({ type: 'bits', value: BIT_OPTIONS[bitsIdx][1] });
   send({ type: 'volume', value: MASTER[4].value });
 
-  $('#power').remove();
   for (let d = 0; d < 3; d++) drawScope(d);
-  initMidi(); // after the gesture so the permission prompt has context
   window.zyg = { ctx: audioCtx, node, trigger, onMidiMessage, capture: (p, secs = 0.6) => capture_spectrogram(new Float32Array(p), audioCtx.sampleRate, SPEC_COLS, SPEC_ROWS, secs) }; // debug/inspection surface
 }
+
+// browsers require one user gesture before audio can run — hijack the first natural one
+let midiStarted = false;
+function wake() {
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+  if (!midiStarted && audioCtx) {
+    midiStarted = true;
+    initMidi();
+  }
+}
+document.addEventListener('pointerdown', wake, { capture: true });
+document.addEventListener('keydown', wake, { capture: true });
 
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
@@ -560,7 +570,4 @@ for (let d = 0; d < 3; d++) voices.appendChild(buildVoice(d));
 buildMaster();
 buildMidiStrip();
 buildDevModal();
-$('#power button').addEventListener('click', () => powerOn().catch((err) => {
-  $('#power .hint').textContent = `failed to start: ${err.message}`;
-  console.error(err);
-}));
+boot().catch((err) => console.error('boot failed:', err));
