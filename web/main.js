@@ -115,7 +115,7 @@ function paramRow(drum, pi) {
     name: `${DRUMS[drum].name} ${PARAMS[pi]}`,
     getNorm: () => drums[drum][pi],
     setNorm: (n) => { drums[drum][pi] = n; }, // params are read per hit, at trigger time
-    getLabel: () => `${Math.round(drums[drum][pi] * 100)}%`,
+    getLabel: () => `${Math.round(drums[drum][pi] * 100)}`,
   });
   if (pi < 9) {
     // per-hit randomisation marker: where the left take actually landed on the last trigger
@@ -123,8 +123,13 @@ function paramRow(drum, pi) {
     tick.className = 'tick';
     bar.append(tick);
     tickSetters[drum][pi] = (l) => {
+      tick.style.transition = 'none';
       tick.style.left = `${l * 100}%`;
       tick.style.opacity = 1;
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        tick.style.transition = 'opacity 1.2s ease-out 0.5s';
+        tick.style.opacity = 0;
+      }));
     };
   }
   row.append(label, bar, val);
@@ -222,7 +227,11 @@ function buildVoice(drum) {
   scopeCanvases[drum] = canvas;
   panel.appendChild(canvas);
 
-  for (let pi = 6; pi < PARAMS.length; pi++) panel.appendChild(paramRow(drum, pi));
+  for (let pi = 6; pi < PARAMS.length; pi++) {
+    const row = paramRow(drum, pi);
+    if (pi === P_HAAS) row.classList.add('sect'); // body | stereo+gain
+    panel.appendChild(row);
+  }
   return panel;
 }
 
@@ -251,7 +260,7 @@ function buildMaster() {
           send({ type: m.msg, value: n });
         }
       },
-      getLabel: () => (isBits ? BIT_OPTIONS[bitsIdx][0] : `${Math.round(m.value * 100)}%`),
+      getLabel: () => (isBits ? BIT_OPTIONS[bitsIdx][0] : `${Math.round(m.value * 100)}`),
     });
     cell.append(label, bar, val);
     strip.appendChild(cell);
