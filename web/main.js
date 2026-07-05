@@ -155,7 +155,7 @@ function drawScope(drum, vl) {
   const g = canvas.getContext('2d');
   const { width: w, height: h } = canvas;
   g.clearRect(0, 0, w, h);
-  const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent');
+  const accent = getComputedStyle(canvas.parentElement).getPropertyValue('--accent');
 
   // amplitude band: fill between per-column min and max
   const mid = h / 2;
@@ -209,6 +209,7 @@ function trigger(drum, vel = 0.9) {
 function buildVoice(drum) {
   const panel = document.createElement('section');
   panel.className = 'voice';
+  panel.dataset.voice = drum;
   const pad = document.createElement('button');
   pad.className = 'pad';
   pad.innerHTML = `${DRUMS[drum].name} <span class="key">${DRUMS[drum].key}</span>`;
@@ -437,7 +438,14 @@ function loadStateFromUrl() {
 // ---------- theme (dev modal: 2 base colors, every other shade derived) ----------
 
 const THEME_KEY = 'zygfred-theme';
-const THEME_DEFAULT = { surface: '#141414', accent: '#b7f34d' };
+const THEME_DEFAULT = {
+  surface: '#141414',
+  accent: '#f0eeea', // master + chassis (title, power, learn)
+  kick: '#dba579',   // frequency register -> color temperature: low = warm
+  snare: '#b3c29a',
+  hihat: '#a8c7e0',
+};
+const VOICE_KEYS = ['kick', 'snare', 'hihat'];
 
 function hexToHsl(hex) {
   const n = parseInt(hex.slice(1), 16);
@@ -471,29 +479,34 @@ function applyTheme(theme) {
   root.setProperty('--dim', text(42));
   root.setProperty('--idle', text(69));
   root.setProperty('--accent', theme.accent);
+  VOICE_KEYS.forEach((k, i) => root.setProperty(`--voice${i}`, theme[k]));
 }
 
 function buildDevModal() {
   const modal = $('#dev');
-  const surface = $('#dev-surface');
-  const accent = $('#dev-accent');
-  let saved = { ...THEME_DEFAULT };
-  try { saved = { ...saved, ...JSON.parse(localStorage.getItem(THEME_KEY) || '{}') }; } catch { /* defaults */ }
-  surface.value = saved.surface;
-  accent.value = saved.accent;
-  applyTheme(saved);
+  const fields = ['surface', 'kick', 'snare', 'hihat', 'accent'];
+  const inputs = Object.fromEntries(fields.map((f) => [f, $(`#dev-${f}`)]));
+  let theme = { ...THEME_DEFAULT };
+  try {
+    const t = JSON.parse(localStorage.getItem(THEME_KEY) || '{}');
+    if (t.kick) theme = { ...theme, ...t };
+    else if (t.surface) theme.surface = t.surface; // pre-per-voice schema: keep surface only
+  } catch { /* defaults */ }
 
-  const update = () => {
-    const t = { surface: surface.value, accent: accent.value };
-    localStorage.setItem(THEME_KEY, JSON.stringify(t));
-    applyTheme(t);
-    if (audioCtx) for (let d = 0; d < 3; d++) drawScope(d); // scope stroke reads --accent
+  const refresh = () => {
+    fields.forEach((f) => { inputs[f].value = theme[f]; });
+    applyTheme(theme);
+    if (audioCtx) for (let d = 0; d < 3; d++) drawScope(d); // scopes read their voice accent
   };
-  surface.addEventListener('input', update);
-  accent.addEventListener('input', update);
+  const update = () => {
+    fields.forEach((f) => { theme[f] = inputs[f].value; });
+    localStorage.setItem(THEME_KEY, JSON.stringify(theme));
+    refresh();
+  };
+  refresh();
+  fields.forEach((f) => inputs[f].addEventListener('input', update));
   $('#dev-reset').addEventListener('click', () => {
-    surface.value = THEME_DEFAULT.surface;
-    accent.value = THEME_DEFAULT.accent;
+    theme = { ...THEME_DEFAULT };
     update();
   });
   $('#dev-open').addEventListener('click', () => { modal.hidden = !modal.hidden; });

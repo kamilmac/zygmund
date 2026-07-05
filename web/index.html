@@ -7,8 +7,11 @@
 <style>
   :root {
     /* two base colors (surface -> bg, accent); every other shade is computed by applyTheme().
-       fallbacks below = applyTheme(#141414, #b7f34d), neutral dark + acid green */
-    --accent: #b7f34d;
+       fallbacks = applyTheme defaults: neutral dark, white chassis, warm->cool voices */
+    --accent: #f0eeea;
+    --voice0: #dba579;
+    --voice1: #b3c29a;
+    --voice2: #a8c7e0;
     --idle: hsl(0 12% 69%);
     --dim: hsl(0 13% 42%);
     --faint: hsl(0 13% 32%);
@@ -44,6 +47,9 @@
     flex-wrap: wrap;
     justify-content: center;
   }
+  .voice[data-voice="0"] { --accent: var(--voice0); }
+  .voice[data-voice="1"] { --accent: var(--voice1); }
+  .voice[data-voice="2"] { --accent: var(--voice2); }
   .voice {
     background: var(--panel);
     padding: 22px 20px 20px;
@@ -228,7 +234,10 @@
   <footer>a / s / d trigger &#183; click pads &#183; drag or scroll the bars &#183; <span class="l">tick</span> = where the last hit landed (Rand) &#183; <button id="dev-open" title="theme">&#9881;</button></footer>
   <div id="dev" hidden>
     <div class="dev-row"><span>surface</span><input type="color" id="dev-surface"></div>
-    <div class="dev-row"><span>accent</span><input type="color" id="dev-accent"></div>
+    <div class="dev-row"><span>kick</span><input type="color" id="dev-kick"></div>
+    <div class="dev-row"><span>snare</span><input type="color" id="dev-snare"></div>
+    <div class="dev-row"><span>hihat</span><input type="color" id="dev-hihat"></div>
+    <div class="dev-row"><span>master</span><input type="color" id="dev-accent"></div>
     <button id="dev-reset">reset</button>
   </div>
   <div id="power">
