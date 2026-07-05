@@ -36,17 +36,7 @@
     user-select: none;
     -webkit-user-select: none;
   }
-  h1 {
-    color: var(--idle);
-    font-size: 12px;
-    font-weight: 700;
-    letter-spacing: 2px;
-    margin-bottom: 20px;
-    width: min(886px, 100%); /* align with the panel row's left edge */
-    text-align: left;
-  }
-  h1 .mark { color: var(--accent); }
-  h1 .sub { color: var(--faint); font-weight: 400; letter-spacing: 1px; }
+
   #voices {
     display: flex;
     gap: 20px;
@@ -179,8 +169,20 @@
     cursor: pointer;
   }
   #locked[hidden] { display: none; }
-  footer { color: var(--faint); font-size: 12px; margin-top: 20px; text-align: center; }
-  footer .l { color: #cdd2e0; }
+  footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 20px;
+    flex-wrap: wrap;
+    width: min(886px, 100%);
+    color: var(--faint);
+    font-size: 12px;
+    margin-top: 20px;
+  }
+  footer .brand { color: var(--idle); font-weight: 700; letter-spacing: 2px; }
+  footer .brand .mark { color: var(--accent); }
+  footer .brand .sub { color: var(--faint); font-weight: 400; letter-spacing: 1px; }
   #dev-open {
     background: none;
     border: none;
@@ -225,11 +227,13 @@
 </head>
 <body>
   <div id="locked" hidden>MIDI received &#183; audio is locked by the browser &#183; click anywhere</div>
-  <h1><span class="mark">&#9670;</span> zygfred <span class="sub">&#183; FM drums</span></h1>
   <div id="voices"></div>
   <div id="master"></div>
   <div id="midi"></div>
-  <footer>a / s / d trigger &#183; click pads &#183; drag or scroll the bars &#183; <span class="l">tick</span> = where the last hit landed (Rand) &#183; <button id="dev-open" title="theme">&#9881;</button></footer>
+  <footer>
+    <span class="brand"><span class="mark">&#9670;</span> zygfred <span class="sub">&#183; FM drums</span></span>
+    <span>a / s / d trigger &#183; click pads &#183; drag or scroll the bars &#183; <button id="dev-open" title="theme">&#9881;</button></span>
+  </footer>
   <div id="dev" hidden>
     <div class="dev-row"><span>surface</span><input type="color" id="dev-surface"></div>
     <div class="dev-row"><span>kick</span><input type="color" id="dev-kick"></div>
