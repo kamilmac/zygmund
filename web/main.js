@@ -13,7 +13,7 @@ const DRUMS = [
   { name: 'HIHAT', key: 'D' },
 ];
 const BIT_OPTIONS = [
-  ['off', 0], ['12-bit', 2048], ['8-bit', 128], ['6-bit', 32], ['4-bit', 8], ['3-bit', 4],
+  ['off', 0], ['12bit', 2048], ['8bit', 128], ['6bit', 32], ['4bit', 8], ['3bit', 4],
 ];
 const MASTER = [
   { name: 'Drive', msg: 'drive', value: 0.0 },
@@ -485,6 +485,7 @@ function buildHelp() {
 // ---------- presets (hold a slot to save, click / keys 1-8 to load) ----------
 
 const PRESET_KEY = 'zygfred-presets';
+const PRESET_HELP = 'hold to save \u00b7 click or 1\u20138 to load';
 const PRESET_SLOTS = 8;
 let presets = {};
 try { presets = JSON.parse(localStorage.getItem(PRESET_KEY) || '{}'); } catch { /* fresh */ }
@@ -511,7 +512,7 @@ function presetHint(text, sticky) {
   hint.classList.add('accent');
   if (!sticky) {
     presetHintTimer = setTimeout(() => {
-      hint.textContent = '';
+      hint.textContent = PRESET_HELP;
       hint.classList.remove('accent');
     }, 1600);
   }
@@ -571,6 +572,7 @@ function buildPresets() {
   }
   const hint = document.createElement('span');
   hint.className = 'hint';
+  hint.textContent = PRESET_HELP;
   strip.append(hint);
 }
 

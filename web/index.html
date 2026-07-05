@@ -118,30 +118,17 @@
     margin-top: 20px;
     width: min(886px, 100%);
   }
-  #midi {
+  #midi { gap: 14px; }
+  #presets, #midi {
     display: flex;
     align-items: center;
-    gap: 14px;
-    flex: 1;
-    min-width: 0;
-    justify-content: flex-end;
-  }
-  #strip {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 12px 32px;
+    gap: 8px;
     background: var(--panel);
     padding: 12px 20px;
     margin-top: 20px;
     width: min(886px, 100%);
     font-size: 12px;
     color: var(--dim);
-  }
-  #presets {
-    display: flex;
-    align-items: center;
-    gap: 8px;
   }
   #presets .tag { color: var(--faint); letter-spacing: 2px; margin-right: 6px; }
   #presets .slot {
@@ -161,7 +148,7 @@
     transition: background 0.6s linear, color 0.6s linear;
   }
   #presets .slot.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
-  #presets .hint { color: var(--faint); min-width: 64px; }
+  #presets .hint { margin-left: auto; text-align: right; color: var(--faint); }
   #presets .hint.accent { color: var(--accent); }
   #midi .tag { color: var(--faint); letter-spacing: 2px; }
   #midi select {
@@ -184,7 +171,7 @@
   #midi .learn:hover { color: var(--idle); }
   #midi .learn.on { color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); }
   #midi .learn:disabled { opacity: 0.4; cursor: default; }
-  #midi .status { text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #midi .status { margin-left: auto; text-align: right; }
   #midi .status.accent { color: var(--accent); }
   .bar:hover { filter: brightness(1.18); }
   .bar.armed { box-shadow: 0 0 0 1px var(--accent); }
@@ -285,10 +272,8 @@
   <div id="locked" hidden>MIDI received &#183; audio is locked by the browser &#183; click anywhere</div>
   <div id="voices"></div>
   <div id="master"></div>
-  <div id="strip">
-    <div id="presets"></div>
-    <div id="midi"></div>
-  </div>
+  <div id="presets"></div>
+  <div id="midi"></div>
   <footer>
     <span class="brand"><span class="mark">&#9670;</span> zygfred <span class="sub">&#183; FM drums</span></span>
     <span>a / s / d trigger &#183; <button id="help-open" title="help">?</button> <button id="dev-open" title="theme">&#9881;</button></span>
