@@ -508,7 +508,8 @@ function buildDevModal() {
   fields.forEach((f) => inputs[f].addEventListener('input', update));
   $('#dev-reset').addEventListener('click', () => {
     theme = { ...THEME_DEFAULT };
-    update();
+    localStorage.setItem(THEME_KEY, JSON.stringify(theme));
+    refresh(); // refresh writes theme -> inputs; update() would read stale inputs back
   });
   $('#dev-open').addEventListener('click', () => { modal.hidden = !modal.hidden; });
 }
