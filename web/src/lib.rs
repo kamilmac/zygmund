@@ -80,27 +80,37 @@ fn compressor(amount: &Shared) -> An<impl AudioNode<Inputs = U1, Outputs = U1>> 
         })
 }
 
+/// Master chain: reverb -> drive -> bits -> compressor -> volume (limiter last as safety).
 fn build_net(
     seq_backend: Box<dyn AudioUnit>,
     drive: &Shared,
     reverb_amt: &Shared,
+    quant: &Shared,
     comp: &Shared,
     volume: &Shared,
     sr: f64,
 ) -> Net {
     let mut net = Net::wrap(seq_backend);
-    // drive (dry/wet hard tanh)
-    let dist = (pass() * 3.0 >> shape(Tanh(2.0))) | (pass() * 3.0 >> shape(Tanh(2.0)));
-    net = net
-        >> ((1.0 - var(drive) >> follow(0.01) >> split::<U2>()) * multipass::<U2>()
-            & (var(drive) >> follow(0.01) >> split::<U2>()) * dist);
     // room reverb (dry/wet)
     let room = reverb2_stereo(14.0, 0.6, 0.5, 1.0, highshelf_hz(4000.0, 1.0, db_amp(-2.0)));
     net = net
         >> ((1.0 - var(reverb_amt) >> follow(0.01) >> split::<U2>()) * multipass::<U2>()
             & (var(reverb_amt) >> follow(0.01) >> split::<U2>()) * room);
-    net = net >> ((var(volume) >> follow(0.02) >> split::<U2>()) * multipass::<U2>());
+    // drive (dry/wet hard tanh)
+    let dist = (pass() * 3.0 >> shape(Tanh(2.0))) | (pass() * 3.0 >> shape(Tanh(2.0)));
+    net = net
+        >> ((1.0 - var(drive) >> follow(0.01) >> split::<U2>()) * multipass::<U2>()
+            & (var(drive) >> follow(0.01) >> split::<U2>()) * dist);
+    // bit crusher (quant = live levels, 0 = off)
+    fn crush(x: f32, levels: f32) -> f32 {
+        if levels >= 1.0 { (x * levels).round() / levels } else { x }
+    }
+    let (q1, q2) = (quant.clone(), quant.clone());
+    net = net
+        >> (map(move |f: &Frame<f32, U1>| crush(f[0], q1.value()))
+            | map(move |f: &Frame<f32, U1>| crush(f[0], q2.value())));
     net = net >> (compressor(comp) | compressor(comp)); // snappy bus comp
+    net = net >> ((var(volume) >> follow(0.02) >> split::<U2>()) * multipass::<U2>());
     net = net >> limiter_stereo(0.003, 0.1);
     net.set_sample_rate(sr);
     net
@@ -117,7 +127,7 @@ pub struct Engine {
     reverb_sh: Shared,
     comp_sh: Shared,
     vol_sh: Shared,
-    quant: f32, // bit-crush levels (0 = off), applied post-net like the native callback
+    quant_sh: Shared, // bit-crush levels (0 = off), read live by the in-net crusher
     buf_l: [f32; BLOCK],
     buf_r: [f32; BLOCK],
 }
@@ -135,10 +145,12 @@ impl Engine {
         let reverb_sh = shared(0.0);
         let comp_sh = shared(0.0);
         let vol_sh = shared(0.7);
+        let quant_sh = shared(0.0);
         let mut net = build_net(
             Box::new(seq_backend),
             &drive_sh,
             &reverb_sh,
+            &quant_sh,
             &comp_sh,
             &vol_sh,
             sr,
@@ -153,7 +165,7 @@ impl Engine {
             reverb_sh,
             comp_sh,
             vol_sh,
-            quant: 0.0,
+            quant_sh,
             buf_l: [0.0; BLOCK],
             buf_r: [0.0; BLOCK],
         }
@@ -177,7 +189,7 @@ impl Engine {
 
     /// Bit-crush quantization levels (0 = off, 2048 = 12-bit, ... 4 = 3-bit).
     pub fn set_bits_levels(&mut self, levels: f32) {
-        self.quant = levels;
+        self.quant_sh.set_value(levels);
     }
 
     /// Play one hit. The caller (UI thread) owns param state and the per-hit randomisation, so it
@@ -205,12 +217,10 @@ impl Engine {
     /// Render `frames` (<= BLOCK) into the internal L/R buffers.
     pub fn process(&mut self, frames: usize) {
         let n = std::cmp::Ord::min(frames, BLOCK);
-        let levels = self.quant;
-        let crush = |x: f32| if levels >= 1.0 { (x * levels).round() / levels } else { x };
         for i in 0..n {
             let (l, r) = self.backend.get_stereo();
-            self.buf_l[i] = crush(l);
-            self.buf_r[i] = crush(r);
+            self.buf_l[i] = l;
+            self.buf_r[i] = r;
         }
     }
 
