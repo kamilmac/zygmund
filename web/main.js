@@ -40,7 +40,11 @@ function send(msg) {
 
 // ---------- generic bar control ----------
 
-function makeBar({ getNorm, setNorm, getLabel, discreteSteps }) {
+// registry of every learnable control, indexed by id: 0..35 drum params (drum*12+param),
+// 36..40 master — same id scheme as native zygfred's CC map
+const controls = [];
+
+function makeBar({ id, name, getNorm, setNorm, getLabel, discreteSteps }) {
   const bar = document.createElement('div');
   bar.className = 'bar';
   const fill = document.createElement('div');
@@ -61,6 +65,7 @@ function makeBar({ getNorm, setNorm, getLabel, discreteSteps }) {
     refresh();
   };
   bar.addEventListener('pointerdown', (e) => {
+    if (id !== undefined && tryArmLearn(id)) return; // learn mode: pick this control, don't set it
     bar.setPointerCapture(e.pointerId);
     setFromEvent(e);
   });
@@ -76,6 +81,16 @@ function makeBar({ getNorm, setNorm, getLabel, discreteSteps }) {
   }, { passive: false });
 
   refresh();
+  if (id !== undefined) {
+    controls[id] = {
+      apply: (n) => {
+        setNorm(Math.min(1, Math.max(0, n)));
+        refresh();
+      },
+      bar,
+      name,
+    };
+  }
   return { bar, val, refresh };
 }
 
@@ -88,6 +103,8 @@ function paramRow(drum, pi) {
   label.className = 'label';
   label.textContent = PARAMS[pi];
   const { bar, val } = makeBar({
+    id: drum * PARAMS.length + pi,
+    name: `${DRUMS[drum].name} ${PARAMS[pi]}`,
     getNorm: () => drums[drum][pi],
     setNorm: (n) => { drums[drum][pi] = n; }, // params are read per hit, at trigger time
     getLabel: () => `${Math.round(drums[drum][pi] * 100)}%`,
@@ -194,7 +211,7 @@ function buildVoice(drum) {
 
 function buildMaster() {
   const strip = $('#master');
-  for (const m of MASTER) {
+  for (const [mi, m] of MASTER.entries()) {
     const cell = document.createElement('div');
     cell.className = 'row';
     const label = document.createElement('span');
@@ -202,6 +219,8 @@ function buildMaster() {
     label.textContent = m.name;
     const isBits = m.msg === 'bits';
     const { bar, val } = makeBar({
+      id: 36 + mi,
+      name: m.name,
       discreteSteps: isBits ? BIT_OPTIONS.length : 0,
       getNorm: () => (isBits ? bitsIdx / (BIT_OPTIONS.length - 1) : m.value),
       setNorm: (n) => {
@@ -218,6 +237,137 @@ function buildMaster() {
     cell.append(label, bar, val);
     strip.appendChild(cell);
   }
+}
+
+// ---------- MIDI (Web MIDI: Digitakt note triggers + CC learn + channel filter) ----------
+
+let midiAccess = null;
+let midiChannel = +(localStorage.getItem('zygfred-midi-ch') || 0); // 0 = omni
+let ccMap = {}; // cc number -> control id
+try { ccMap = JSON.parse(localStorage.getItem('zygfred-cc') || '{}'); } catch { /* fresh map */ }
+let learn = null; // null | 'pick' (waiting for a slider click) | control id (waiting for a CC)
+let toastTimer = null;
+const midiEls = {};
+
+function saveCcMap() {
+  localStorage.setItem('zygfred-cc', JSON.stringify(ccMap));
+}
+
+function refreshMidiStatus() {
+  if (!midiEls.status) return;
+  if (!midiAccess) return;
+  const names = [...midiAccess.inputs.values()].map((p) => p.name);
+  const port = names.length ? names.join(' · ') : 'no device';
+  midiEls.status.textContent = `${port} · ${Object.keys(ccMap).length} CC maps`;
+}
+
+function toast(text) {
+  clearTimeout(toastTimer);
+  midiEls.status.classList.add('accent');
+  midiEls.status.textContent = text;
+  toastTimer = setTimeout(() => {
+    midiEls.status.classList.remove('accent');
+    refreshMidiStatus();
+  }, 2000);
+}
+
+function tryArmLearn(id) {
+  if (learn !== 'pick') return false;
+  learn = id;
+  controls[id].bar.classList.add('armed');
+  midiEls.status.textContent = `learn: turn a knob for ${controls[id].name}`;
+  return true;
+}
+
+function disarmLearn() {
+  if (typeof learn === 'number') controls[learn]?.bar.classList.remove('armed');
+  learn = null;
+  midiEls.learnBtn?.classList.remove('on');
+  refreshMidiStatus();
+}
+
+function onMidiMessage(e) {
+  if (e.data.length < 3) return;
+  const [status, d1, d2] = e.data;
+  const ch = status & 0x0f;
+  if (midiChannel !== 0 && midiChannel !== ch + 1) return;
+  const type = status & 0xf0;
+  if (type === 0x90 && d2 > 0) {
+    const drum = SEMITONE_DRUM[d1 % 12]; // any C/D/E pitch class, like native
+    if (drum !== undefined) trigger(drum, d2 / 127);
+  } else if (type === 0xb0) {
+    if (typeof learn === 'number') {
+      const id = learn;
+      ccMap[d1] = id;
+      saveCcMap();
+      disarmLearn();
+      toast(`CC${d1} → ${controls[id].name}`);
+    } else if (ccMap[d1] !== undefined) {
+      controls[ccMap[d1]]?.apply(d2 / 127);
+    }
+  }
+}
+
+function attachMidiInputs() {
+  for (const input of midiAccess.inputs.values()) input.onmidimessage = onMidiMessage;
+  refreshMidiStatus();
+}
+
+async function initMidi() {
+  if (!navigator.requestMIDIAccess) {
+    midiEls.status.textContent = 'Web MIDI not supported in this browser';
+    midiEls.learnBtn.disabled = true;
+    return;
+  }
+  try {
+    midiAccess = await navigator.requestMIDIAccess();
+  } catch {
+    midiEls.status.textContent = 'MIDI access denied';
+    return;
+  }
+  midiAccess.onstatechange = attachMidiInputs; // hot-plug: Digitakt can arrive later
+  attachMidiInputs();
+}
+
+function buildMidiStrip() {
+  const strip = $('#midi');
+  const tag = document.createElement('span');
+  tag.className = 'tag';
+  tag.textContent = 'MIDI';
+
+  const chSel = document.createElement('select');
+  ['Omni', ...Array.from({ length: 16 }, (_, i) => `ch ${i + 1}`)].forEach((t, i) => {
+    const o = document.createElement('option');
+    o.value = i;
+    o.textContent = t;
+    chSel.append(o);
+  });
+  chSel.value = midiChannel;
+  chSel.addEventListener('change', () => {
+    midiChannel = +chSel.value;
+    localStorage.setItem('zygfred-midi-ch', midiChannel);
+  });
+
+  const learnBtn = document.createElement('button');
+  learnBtn.className = 'learn';
+  learnBtn.textContent = 'learn';
+  learnBtn.addEventListener('click', () => {
+    if (learn !== null) {
+      disarmLearn();
+      return;
+    }
+    learn = 'pick';
+    learnBtn.classList.add('on');
+    midiEls.status.textContent = 'learn: click a slider, then turn a knob';
+  });
+
+  const status = document.createElement('span');
+  status.className = 'status';
+  status.textContent = 'power on to enable';
+
+  midiEls.learnBtn = learnBtn;
+  midiEls.status = status;
+  strip.append(tag, chSel, learnBtn, status);
 }
 
 // ---------- boot ----------
@@ -242,11 +392,16 @@ async function powerOn() {
 
   $('#power').remove();
   for (let d = 0; d < 3; d++) drawScope(d);
-  window.zyg = { ctx: audioCtx, node, trigger }; // debug/inspection surface
+  initMidi(); // after the gesture so the permission prompt has context
+  window.zyg = { ctx: audioCtx, node, trigger, onMidiMessage }; // debug/inspection surface
 }
 
 document.addEventListener('keydown', (e) => {
-  if (e.repeat || e.metaKey || e.ctrlKey) return;
+  if (e.key === 'Escape') {
+    disarmLearn();
+    return;
+  }
+  if (e.repeat || e.metaKey || e.ctrlKey || e.target.tagName === 'SELECT') return;
   const st = KEY_SEMITONE[e.key.toLowerCase()];
   if (st === undefined) return;
   const drum = SEMITONE_DRUM[((st % 12) + 12) % 12];
@@ -256,6 +411,7 @@ document.addEventListener('keydown', (e) => {
 const voices = $('#voices');
 for (let d = 0; d < 3; d++) voices.appendChild(buildVoice(d));
 buildMaster();
+buildMidiStrip();
 $('#power button').addEventListener('click', () => powerOn().catch((err) => {
   $('#power .hint').textContent = `failed to start: ${err.message}`;
   console.error(err);
