@@ -441,9 +441,9 @@ const THEME_KEY = 'zygfred-theme';
 const THEME_DEFAULT = {
   surface: '#0a0a0a',
   accent: '#f0eeea', // master + chassis (title, power, learn)
-  kick: '#a7db78',
-  snare: '#6b58bb',
-  hihat: '#d47a77',
+  kick: '#7dc9d1',
+  snare: '#b8486d',
+  hihat: '#d8bf5f',
 };
 const VOICE_KEYS = ['kick', 'snare', 'hihat'];
 
