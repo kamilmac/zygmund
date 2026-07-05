@@ -8,7 +8,6 @@
 use fundsp::prelude64::*;
 use wasm_bindgen::prelude::*;
 
-pub const SCOPE_N: usize = 64;
 pub const BLOCK: usize = 128; // AudioWorklet render quantum
 
 // ---------- drum voice (generalized FM percussion) ----------
@@ -235,10 +234,19 @@ impl Engine {
     }
 }
 
-/// Render a dry voice offline and capture a short waveform window (peak-per-bin) for the scope.
-/// Runs on the main thread in its own wasm instance — never touches the audio engine.
+/// Render a dry voice offline and return a log-frequency spectrogram: `rows * cols` values in
+/// 0..1 (dB-mapped, -60 dB floor), row-major, row 0 = highest frequency. `seconds` sets the
+/// analysis span. Runs on the main thread in its own wasm instance — never touches the engine.
 #[wasm_bindgen]
-pub fn capture_scope(params: &[f32], sample_rate: f32) -> Vec<f32> {
+pub fn capture_spectrogram(
+    params: &[f32],
+    sample_rate: f32,
+    cols: usize,
+    rows: usize,
+    seconds: f32,
+) -> Vec<f32> {
+    use core::f32::consts::PI as PI32;
+    const FFT: usize = 1024;
     let mut snd = [0.0f32; 9];
     for i in 0..std::cmp::Ord::min(9, params.len()) {
         snd[i] = params[i];
@@ -246,22 +254,94 @@ pub fn capture_scope(params: &[f32], sample_rate: f32) -> Vec<f32> {
     let mut v: Box<dyn AudioUnit> = Box::new(drum_mono(snd, 0.95));
     v.set_sample_rate(sample_rate as f64);
     v.allocate();
-    let window = (0.05 * sample_rate) as usize; // ~50 ms
-    let step = std::cmp::max(window / SCOPE_N, 1);
-    let mut out = vec![0.0f32; SCOPE_N];
-    let (mut oi, mut peak, mut cnt) = (0usize, 0.0f32, 0usize);
-    for _ in 0..window {
-        let s = v.get_mono();
-        if s.abs() > peak.abs() {
-            peak = s;
+    let n = std::cmp::Ord::max((seconds * sample_rate) as usize, FFT + cols);
+    let mut samples = vec![0.0f32; n];
+    for s in samples.iter_mut() {
+        *s = v.get_mono();
+    }
+
+    let hann: Vec<f32> = (0..FFT)
+        .map(|i| 0.5 - 0.5 * (2.0 * PI32 * i as f32 / (FFT as f32 - 1.0)).cos())
+        .collect();
+    let hop = std::cmp::Ord::max((n - FFT) / std::cmp::Ord::max(cols - 1, 1), 1);
+    let bin_hz = sample_rate / FFT as f32;
+    let f_min = 30.0f32;
+    let f_max = (sample_rate / 2.0).min(12000.0);
+    let mut out = vec![0.0f32; rows * cols];
+    let mut re = vec![0.0f32; FFT];
+    let mut im = vec![0.0f32; FFT];
+    for c in 0..cols {
+        let start = c * hop;
+        if start + FFT > n {
+            break;
         }
-        cnt += 1;
-        if cnt >= step && oi < SCOPE_N {
-            out[oi] = peak;
-            oi += 1;
-            peak = 0.0;
-            cnt = 0;
+        for i in 0..FFT {
+            re[i] = samples[start + i] * hann[i];
+            im[i] = 0.0;
+        }
+        fft_inplace(&mut re, &mut im);
+        for r in 0..rows {
+            // log-frequency bands, top row = f_max
+            let f_hi = f_min * (f_max / f_min).powf(1.0 - r as f32 / rows as f32);
+            let f_lo = f_min * (f_max / f_min).powf(1.0 - (r as f32 + 1.0) / rows as f32);
+            let b_lo = (f_lo / bin_hz) as usize;
+            let b_hi = std::cmp::Ord::min(
+                std::cmp::Ord::max((f_hi / bin_hz) as usize, b_lo + 1),
+                FFT / 2,
+            );
+            let mut mag = 0.0f32;
+            for b in b_lo..b_hi {
+                let m = re[b] * re[b] + im[b] * im[b];
+                if m > mag {
+                    mag = m;
+                }
+            }
+            // hann-windowed full-scale sine peaks near FFT/4 — normalize against that
+            let db = 10.0 * (mag / ((FFT * FFT) as f32 / 16.0) + 1e-12).log10();
+            out[r * cols + c] = ((db + 54.0) / 54.0).clamp(0.0, 1.0);
         }
     }
     out
+}
+
+/// Iterative radix-2 FFT, in place. Length must be a power of two.
+fn fft_inplace(re: &mut [f32], im: &mut [f32]) {
+    use core::f32::consts::PI as PI32;
+    let n = re.len();
+    let mut j = 0;
+    for i in 1..n {
+        let mut bit = n >> 1;
+        while j & bit != 0 {
+            j ^= bit;
+            bit >>= 1;
+        }
+        j |= bit;
+        if i < j {
+            re.swap(i, j);
+            im.swap(i, j);
+        }
+    }
+    let mut len = 2;
+    while len <= n {
+        let ang = -2.0 * PI32 / len as f32;
+        let (wr, wi) = (ang.cos(), ang.sin());
+        let mut i = 0;
+        while i < n {
+            let (mut cr, mut ci) = (1.0f32, 0.0f32);
+            for k in 0..len / 2 {
+                let (ur, ui) = (re[i + k], im[i + k]);
+                let (sr, si) = (re[i + k + len / 2], im[i + k + len / 2]);
+                let (vr, vi) = (sr * cr - si * ci, sr * ci + si * cr);
+                re[i + k] = ur + vr;
+                im[i + k] = ui + vi;
+                re[i + k + len / 2] = ur - vr;
+                im[i + k + len / 2] = ui - vi;
+                let ncr = cr * wr - ci * wi;
+                ci = cr * wi + ci * wr;
+                cr = ncr;
+            }
+            i += len;
+        }
+        len <<= 1;
+    }
 }

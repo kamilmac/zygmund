@@ -27,17 +27,18 @@ export class Engine {
 }
 
 /**
- * Render a dry voice offline and capture a short waveform window (peak-per-bin) for the scope.
- * Runs on the main thread in its own wasm instance — never touches the audio engine.
+ * Render a dry voice offline and return a log-frequency spectrogram: `rows * cols` values in
+ * 0..1 (dB-mapped, -60 dB floor), row-major, row 0 = highest frequency. `seconds` sets the
+ * analysis span. Runs on the main thread in its own wasm instance — never touches the engine.
  */
-export function capture_scope(params: Float32Array, sample_rate: number): Float32Array;
+export function capture_spectrogram(params: Float32Array, sample_rate: number, cols: number, rows: number, seconds: number): Float32Array;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_engine_free: (a: number, b: number) => void;
-    readonly capture_scope: (a: number, b: number, c: number) => [number, number];
+    readonly capture_spectrogram: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
     readonly engine_left_ptr: (a: number) => number;
     readonly engine_new: (a: number) => number;
     readonly engine_process: (a: number, b: number) => void;

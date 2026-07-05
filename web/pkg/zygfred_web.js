@@ -93,16 +93,20 @@ export class Engine {
 if (Symbol.dispose) Engine.prototype[Symbol.dispose] = Engine.prototype.free;
 
 /**
- * Render a dry voice offline and capture a short waveform window (peak-per-bin) for the scope.
- * Runs on the main thread in its own wasm instance — never touches the audio engine.
+ * Render a dry voice offline and return a log-frequency spectrogram: `rows * cols` values in
+ * 0..1 (dB-mapped, -60 dB floor), row-major, row 0 = highest frequency. `seconds` sets the
+ * analysis span. Runs on the main thread in its own wasm instance — never touches the engine.
  * @param {Float32Array} params
  * @param {number} sample_rate
+ * @param {number} cols
+ * @param {number} rows
+ * @param {number} seconds
  * @returns {Float32Array}
  */
-export function capture_scope(params, sample_rate) {
+export function capture_spectrogram(params, sample_rate, cols, rows, seconds) {
     const ptr0 = passArrayF32ToWasm0(params, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.capture_scope(ptr0, len0, sample_rate);
+    const ret = wasm.capture_spectrogram(ptr0, len0, sample_rate, cols, rows, seconds);
     var v2 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
     wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
     return v2;

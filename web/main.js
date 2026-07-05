@@ -1,6 +1,6 @@
 // zygfred web UI: builds the three-voice param matrix from config, talks to the AudioWorklet
 // over its message port, and renders per-voice scopes via a main-thread wasm instance.
-import init, { capture_scope } from './pkg/zygfred_web.js';
+import init, { capture_spectrogram } from './pkg/zygfred_web.js';
 
 const PARAMS = ['Tune', 'Ratio', 'FM', 'FMDec', 'PEnv', 'PDec', 'Decay', 'Snap', 'Tone', 'Haas', 'Rand', 'Width', 'Vol'];
 const P_HAAS = 9;
@@ -135,23 +135,46 @@ function paramRow(drum, pi) {
 
 const scopeCanvases = [];
 
+const SPEC_COLS = 256;
+const SPEC_ROWS = 56;
+
+function accentRgb() {
+  const probe = document.createElement('canvas');
+  probe.width = probe.height = 1;
+  const pg = probe.getContext('2d');
+  pg.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--accent');
+  pg.fillRect(0, 0, 1, 1);
+  return pg.getImageData(0, 0, 1, 1).data;
+}
+
+// spectrogram of the hit: time -> across (whole hit, decay-adaptive), log frequency 30Hz..12kHz
+// -> up, accent-color intensity = energy (dB)
 function drawScope(drum, vl) {
   const canvas = scopeCanvases[drum];
   if (!canvas || !audioCtx) return;
-  const g = canvas.getContext('2d');
-  const { width: w, height: h } = canvas;
-  g.clearRect(0, 0, w, h);
   const take = vl ? new Float32Array(vl) : new Float32Array(drums[drum].slice(0, 9));
-  const pts = capture_scope(take, audioCtx.sampleRate);
-  g.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--accent');
-  g.lineWidth = 1.5;
-  g.beginPath();
-  for (let i = 0; i < pts.length; i++) {
-    const x = (i / (pts.length - 1)) * w;
-    const y = h / 2 - pts[i] * (h / 2 - 2);
-    i === 0 ? g.moveTo(x, y) : g.lineTo(x, y);
+  // time span = where the amp envelope reaches -60dB (dec rate = 40 - 37*decay, env = e^-t*dec)
+  const decRate = 40 - 37 * take[6];
+  const seconds = Math.min(1.2, Math.max(0.15, 6.9 / decRate));
+  const mags = capture_spectrogram(take, audioCtx.sampleRate, SPEC_COLS, SPEC_ROWS, seconds);
+  const [ar, ag, ab] = accentRgb();
+  const img = new ImageData(SPEC_COLS, SPEC_ROWS);
+  for (let i = 0; i < SPEC_ROWS * SPEC_COLS; i++) {
+    const v = mags[i];
+    const hot = Math.max(0, v - 0.75) * 2.4; // hottest energy glows toward white
+    img.data[i * 4] = Math.min(255, ar + (255 - ar) * hot);
+    img.data[i * 4 + 1] = Math.min(255, ag + (255 - ag) * hot);
+    img.data[i * 4 + 2] = Math.min(255, ab + (255 - ab) * hot);
+    img.data[i * 4 + 3] = Math.round(v ** 1.1 * 255); // gamma tames the noise floor
   }
-  g.stroke();
+  const off = document.createElement('canvas');
+  off.width = SPEC_COLS;
+  off.height = SPEC_ROWS;
+  off.getContext('2d').putImageData(img, 0, 0);
+  const g = canvas.getContext('2d');
+  g.clearRect(0, 0, canvas.width, canvas.height);
+  g.imageSmoothingEnabled = true;
+  g.drawImage(off, 0, 0, canvas.width, canvas.height);
 }
 
 // ---------- voices ----------
@@ -201,8 +224,8 @@ function buildVoice(drum) {
 
   const canvas = document.createElement('canvas');
   canvas.className = 'scope';
-  canvas.width = 240;
-  canvas.height = 56;
+  canvas.width = 512;
+  canvas.height = 112;
   scopeCanvases[drum] = canvas;
   panel.appendChild(canvas);
 
@@ -501,7 +524,7 @@ async function powerOn() {
   $('#power').remove();
   for (let d = 0; d < 3; d++) drawScope(d);
   initMidi(); // after the gesture so the permission prompt has context
-  window.zyg = { ctx: audioCtx, node, trigger, onMidiMessage }; // debug/inspection surface
+  window.zyg = { ctx: audioCtx, node, trigger, onMidiMessage, capture: (p, secs = 0.6) => capture_spectrogram(new Float32Array(p), audioCtx.sampleRate, SPEC_COLS, SPEC_ROWS, secs) }; // debug/inspection surface
 }
 
 document.addEventListener('keydown', (e) => {
