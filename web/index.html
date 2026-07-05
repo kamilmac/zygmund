@@ -10,8 +10,10 @@
     --chan-r: #6ac8ff;
     --idle: #a5aab9;
     --dim: #5f6278;
-    --bg: #100e14;
-    --panel: #17141d;
+    --faint: #464a5e;
+    --bg: #0d0b11;
+    --panel: #151219;
+    --inset: #0a080d;
   }
   * { box-sizing: border-box; margin: 0; }
   body {
@@ -22,68 +24,62 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: 24px 16px;
+    padding: 48px 24px 40px;
     user-select: none;
     -webkit-user-select: none;
   }
   h1 {
     color: var(--accent);
-    font-size: 15px;
+    font-size: 14px;
     font-weight: 700;
-    letter-spacing: 1px;
-    margin-bottom: 20px;
+    letter-spacing: 3px;
+    margin-bottom: 36px;
   }
-  h1 .sub { color: var(--dim); font-weight: 400; }
+  h1 .sub { color: var(--faint); font-weight: 400; letter-spacing: 1px; }
   #voices {
     display: flex;
-    gap: 14px;
+    gap: 20px;
     flex-wrap: wrap;
     justify-content: center;
   }
   .voice {
     background: var(--panel);
-    border: 1px solid var(--dim);
-    border-radius: 10px;
-    padding: 14px;
-    width: 270px;
+    border-radius: 16px;
+    padding: 22px 20px 20px;
+    width: 282px;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 8px;
+    transition: box-shadow 0.25s ease-out;
   }
-  .voice.hit { animation: flash 0.15s ease-out; }
+  .voice.hit { animation: flash 0.25s ease-out; }
   @keyframes flash {
-    0% { border-color: var(--accent); box-shadow: 0 0 14px rgba(255, 150, 90, 0.45); }
-    100% { border-color: var(--dim); box-shadow: none; }
+    0% { box-shadow: 0 0 0 1px rgba(255, 150, 90, 0.35), 0 0 24px rgba(255, 150, 90, 0.18); }
+    100% { box-shadow: none; }
   }
   .pad {
-    background: none;
-    border: 1px solid var(--dim);
-    border-radius: 6px;
+    background: rgba(255, 150, 90, 0.07);
+    border: none;
+    border-radius: 9px;
     color: var(--accent);
     font: inherit;
     font-weight: 700;
-    letter-spacing: 1px;
-    padding: 8px;
+    letter-spacing: 2px;
+    padding: 11px;
     cursor: pointer;
-    margin-bottom: 6px;
+    margin-bottom: 10px;
   }
-  .pad:active { background: rgba(255, 150, 90, 0.15); }
-  .pad .key {
-    color: var(--dim);
-    font-weight: 400;
-    border: 1px solid var(--dim);
-    border-radius: 3px;
-    padding: 0 5px;
-    margin-left: 6px;
-  }
-  .row { display: flex; align-items: center; gap: 8px; }
+  .pad:hover { background: rgba(255, 150, 90, 0.11); }
+  .pad:active { background: rgba(255, 150, 90, 0.18); }
+  .pad .key { color: var(--dim); font-weight: 400; letter-spacing: 0; margin-left: 8px; }
+  .row { display: flex; align-items: center; gap: 10px; }
   .label { width: 52px; color: var(--dim); flex: none; }
-  .row .val { width: 48px; text-align: right; color: var(--idle); flex: none; }
+  .row .val { width: 46px; text-align: right; color: var(--idle); flex: none; }
   .bar {
     flex: 1;
-    height: 14px;
+    height: 13px;
     border-radius: 3px;
-    background: repeating-linear-gradient(90deg, #262230 0 6px, var(--panel) 6px 8px);
+    background: repeating-linear-gradient(90deg, #221e2b 0 6px, transparent 6px 8px);
     cursor: ew-resize;
     touch-action: none;
     overflow: hidden;
@@ -107,58 +103,59 @@
   .tick-r { background: var(--chan-r); }
   .scope {
     width: 100%;
-    height: 56px;
-    background: var(--bg);
-    border: 1px solid #262230;
-    border-radius: 4px;
-    margin: 4px 0;
+    height: 58px;
+    background: var(--inset);
+    border: none;
+    border-radius: 8px;
+    margin: 8px 0;
   }
   #master {
     display: flex;
-    gap: 22px;
+    gap: 8px 32px;
     flex-wrap: wrap;
     justify-content: center;
     background: var(--panel);
-    border: 1px solid var(--dim);
-    border-radius: 10px;
-    padding: 12px 18px;
-    margin-top: 14px;
-    width: min(842px, 100%);
+    border-radius: 16px;
+    padding: 18px 26px;
+    margin-top: 20px;
+    width: min(886px, 100%);
   }
-  #master .row { flex: 1; min-width: 200px; }
-  footer { color: var(--dim); margin-top: 16px; text-align: center; }
+  #master .row { flex: 1; min-width: 210px; }
+  footer { color: var(--faint); font-size: 12px; margin-top: 26px; text-align: center; }
+  footer .l { color: #cdd2e0; }
+  footer .r { color: var(--chan-r); }
   #power {
     position: fixed;
     inset: 0;
-    background: rgba(16, 14, 20, 0.94);
+    background: rgba(13, 11, 17, 0.95);
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 16px;
+    gap: 18px;
     z-index: 10;
   }
   #power button {
-    background: none;
-    border: 1px solid var(--accent);
-    border-radius: 8px;
+    background: rgba(255, 150, 90, 0.09);
+    border: none;
+    border-radius: 10px;
     color: var(--accent);
     font: inherit;
-    font-size: 16px;
+    font-size: 15px;
     font-weight: 700;
-    letter-spacing: 1px;
-    padding: 14px 34px;
+    letter-spacing: 2px;
+    padding: 16px 42px;
     cursor: pointer;
   }
-  #power button:hover { background: rgba(255, 150, 90, 0.12); }
-  #power .hint { color: var(--dim); }
+  #power button:hover { background: rgba(255, 150, 90, 0.15); }
+  #power .hint { color: var(--faint); }
 </style>
 </head>
 <body>
   <h1>&#9670; zygfred <span class="sub">&#183; FM drums</span></h1>
   <div id="voices"></div>
   <div id="master"></div>
-  <footer>a / s / d trigger &#183; click pads &#183; drag or scroll the bars &#183; <span style="color:#fff">white</span>/<span style="color:var(--chan-r)">blue</span> ticks = where L/R landed on the last hit (Rand)</footer>
+  <footer>a / s / d trigger &#183; click pads &#183; drag or scroll the bars &#183; <span class="l">white</span>/<span class="r">blue</span> ticks = where L/R landed on the last hit (Rand)</footer>
   <div id="power">
     <button>&#9670; power on</button>
     <div class="hint">browsers need a click before audio can start</div>

@@ -113,31 +113,23 @@ function paramRow(drum, pi) {
 
 const scopeCanvases = [];
 
-function drawScope(drum, vl, vr) {
+function drawScope(drum, vl) {
   const canvas = scopeCanvases[drum];
   if (!canvas || !audioCtx) return;
   const g = canvas.getContext('2d');
   const { width: w, height: h } = canvas;
   g.clearRect(0, 0, w, h);
-  const styles = getComputedStyle(document.documentElement);
-  const base = () => new Float32Array(drums[drum].slice(0, 9));
-  // R take first so the L take draws on top
-  const takes = [
-    [vr ? new Float32Array(vr) : base(), styles.getPropertyValue('--chan-r'), 1],
-    [vl ? new Float32Array(vl) : base(), styles.getPropertyValue('--accent'), 1.5],
-  ];
-  for (const [params, color, lineWidth] of takes) {
-    const pts = capture_scope(params, audioCtx.sampleRate);
-    g.strokeStyle = color;
-    g.lineWidth = lineWidth;
-    g.beginPath();
-    for (let i = 0; i < pts.length; i++) {
-      const x = (i / (pts.length - 1)) * w;
-      const y = h / 2 - pts[i] * (h / 2 - 2);
-      i === 0 ? g.moveTo(x, y) : g.lineTo(x, y);
-    }
-    g.stroke();
+  const take = vl ? new Float32Array(vl) : new Float32Array(drums[drum].slice(0, 9));
+  const pts = capture_scope(take, audioCtx.sampleRate);
+  g.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--accent');
+  g.lineWidth = 1.5;
+  g.beginPath();
+  for (let i = 0; i < pts.length; i++) {
+    const x = (i / (pts.length - 1)) * w;
+    const y = h / 2 - pts[i] * (h / 2 - 2);
+    i === 0 ? g.moveTo(x, y) : g.lineTo(x, y);
   }
+  g.stroke();
 }
 
 // ---------- voices ----------
@@ -166,7 +158,7 @@ function trigger(drum, vel = 0.9) {
     len: 0.08 + 1.8 * p[6],
   });
   for (let i = 0; i < 9; i++) tickSetters[drum][i]?.(vl[i], vr[i]);
-  drawScope(drum, vl, vr);
+  drawScope(drum, vl);
   const panel = document.querySelectorAll('.voice')[drum];
   panel.classList.remove('hit');
   void panel.offsetWidth; // restart the flash animation
