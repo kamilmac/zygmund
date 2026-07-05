@@ -122,13 +122,15 @@
     display: flex;
     align-items: center;
     gap: 14px;
+    flex: 1;
+    min-width: 0;
+    justify-content: flex-end;
   }
   #strip {
     display: flex;
     justify-content: space-between;
     align-items: center;
     gap: 12px 32px;
-    flex-wrap: wrap;
     background: var(--panel);
     padding: 12px 20px;
     margin-top: 20px;
@@ -182,7 +184,7 @@
   #midi .learn:hover { color: var(--idle); }
   #midi .learn.on { color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); }
   #midi .learn:disabled { opacity: 0.4; cursor: default; }
-  #midi .status { text-align: right; }
+  #midi .status { text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #midi .status.accent { color: var(--accent); }
   .bar:hover { filter: brightness(1.18); }
   .bar.armed { box-shadow: 0 0 0 1px var(--accent); }

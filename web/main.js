@@ -300,7 +300,7 @@ function tryArmLearn(id) {
   if (learn !== 'pick') return false;
   learn = id;
   controls[id].bar.classList.add('armed');
-  midiEls.status.textContent = `learn: turn a knob for ${controls[id].name}`;
+  midiEls.status.textContent = `turn a knob \u2192 ${controls[id].name}`;
   return true;
 }
 
@@ -384,7 +384,7 @@ function buildMidiStrip() {
     }
     learn = 'pick';
     learnBtn.classList.add('on');
-    midiEls.status.textContent = 'learn: click a slider, then turn a knob';
+    midiEls.status.textContent = 'click a slider\u2026';
   });
 
   const status = document.createElement('span');
