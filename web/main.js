@@ -48,11 +48,7 @@ function send(msg) {
 // incl. per-voice Vol), then master
 const controls = [];
 
-function makeBar({ id, name, getNorm, setNorm: setNormRaw, getLabel, discreteSteps }) {
-  const setNorm = (n) => {
-    setNormRaw(n);
-    scheduleUrlSync(); // every state change flows through here (drag, wheel, CC)
-  };
+function makeBar({ id, name, getNorm, setNorm, getLabel, discreteSteps }) {
   const bar = document.createElement('div');
   bar.className = 'bar';
   const fill = document.createElement('div');
@@ -400,42 +396,6 @@ function buildMidiStrip() {
   strip.append(tag, chSel, learnBtn, status);
 }
 
-// ---------- url state (the query string IS the patch: shareable, bookmarkable) ----------
-
-const URL_DRUM_KEYS = ['k', 's', 'h'];
-let urlTimer = null;
-
-function scheduleUrlSync() {
-  clearTimeout(urlTimer);
-  urlTimer = setTimeout(() => {
-    const q = new URLSearchParams();
-    const pct = (v) => Math.round(v * 100);
-    DRUMS.forEach((_, d) => q.set(URL_DRUM_KEYS[d], drums[d].map(pct).join('.')));
-    q.set('m', [pct(MASTER[0].value), pct(MASTER[1].value), pct(MASTER[2].value), bitsIdx, pct(MASTER[4].value)].join('.'));
-    history.replaceState(null, '', `${location.pathname}?${q}`);
-  }, 500);
-}
-
-function loadStateFromUrl() {
-  const q = new URLSearchParams(location.search);
-  DRUMS.forEach((_, d) => {
-    const raw = q.get(URL_DRUM_KEYS[d]);
-    if (!raw) return;
-    raw.split('.').forEach((s, i) => {
-      if (i < PARAMS.length && s !== '') drums[d][i] = clamp01((+s || 0) / 100);
-    });
-  });
-  const m = q.get('m');
-  if (m) {
-    const [drive, reverb, comp, bits, volume] = m.split('.').map(Number);
-    MASTER[0].value = clamp01((drive || 0) / 100);
-    MASTER[1].value = clamp01((reverb || 0) / 100);
-    MASTER[2].value = clamp01((comp || 0) / 100);
-    bitsIdx = Math.min(BIT_OPTIONS.length - 1, Math.max(0, Math.round(bits || 0)));
-    MASTER[4].value = clamp01((volume || 0) / 100);
-  }
-}
-
 // ---------- theme (dev modal: 2 base colors, every other shade derived) ----------
 
 const THEME_KEY = 'zygfred-theme';
@@ -522,6 +482,90 @@ function buildHelp() {
   });
 }
 
+// ---------- presets (hold a slot to save, click / keys 1-8 to load) ----------
+
+const PRESET_KEY = 'zygfred-presets';
+const PRESET_SLOTS = 8;
+let presets = {};
+try { presets = JSON.parse(localStorage.getItem(PRESET_KEY) || '{}'); } catch { /* fresh */ }
+let currentSlot = null;
+const slotSyncs = [];
+let presetHintTimer = null;
+
+function snapshotState() {
+  return { drums: drums.map((p) => [...p]), master: MASTER.map((mm) => mm.value), bits: bitsIdx };
+}
+
+function applyState(st) {
+  st.drums.forEach((p, d) => p.forEach((v, i) => controls[d * PARAMS.length + i]?.apply(v)));
+  const base = DRUMS.length * PARAMS.length;
+  st.master.forEach((v, mi) => { if (mi !== 3) controls[base + mi]?.apply(v); });
+  controls[base + 3]?.apply(st.bits / (BIT_OPTIONS.length - 1));
+  if (audioCtx) for (let d = 0; d < 3; d++) drawScope(d);
+}
+
+function presetHint(text, sticky) {
+  const hint = $('#presets .hint');
+  clearTimeout(presetHintTimer);
+  hint.textContent = text;
+  hint.classList.add('accent');
+  if (!sticky) {
+    presetHintTimer = setTimeout(() => {
+      hint.textContent = '';
+      hint.classList.remove('accent');
+    }, 1600);
+  }
+}
+
+function loadPreset(i) {
+  if (!presets[i]) return;
+  applyState(presets[i]);
+  currentSlot = i;
+  slotSyncs.forEach((f) => f());
+  presetHint(`loaded ${i}`);
+}
+
+function buildPresets() {
+  const strip = $('#presets');
+  const tag = document.createElement('span');
+  tag.className = 'tag';
+  tag.textContent = 'PRESET';
+  strip.append(tag);
+  for (let i = 1; i <= PRESET_SLOTS; i++) {
+    const b = document.createElement('button');
+    b.className = 'slot';
+    b.textContent = i;
+    const sync = () => {
+      b.classList.toggle('filled', !!presets[i]);
+      b.classList.toggle('active', currentSlot === i);
+    };
+    slotSyncs.push(sync);
+    let hold = null;
+    let held = false;
+    b.addEventListener('pointerdown', () => {
+      held = false;
+      hold = setTimeout(() => {
+        held = true;
+        presets[i] = snapshotState();
+        localStorage.setItem(PRESET_KEY, JSON.stringify(presets));
+        currentSlot = i;
+        slotSyncs.forEach((f) => f());
+        presetHint(`saved ${i}`);
+      }, 600);
+    });
+    b.addEventListener('pointerup', () => {
+      clearTimeout(hold);
+      if (!held) loadPreset(i);
+    });
+    b.addEventListener('pointerleave', () => clearTimeout(hold));
+    sync();
+    strip.append(b);
+  }
+  const hint = document.createElement('span');
+  hint.className = 'hint';
+  strip.append(hint);
+}
+
 // ---------- boot ----------
 
 async function boot() {
@@ -570,17 +614,21 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (e.repeat || e.metaKey || e.ctrlKey || e.target.tagName === 'SELECT') return;
+  if (e.key >= '1' && e.key <= String(PRESET_SLOTS)) {
+    loadPreset(+e.key);
+    return;
+  }
   const st = KEY_SEMITONE[e.key.toLowerCase()];
   if (st === undefined) return;
   const drum = SEMITONE_DRUM[((st % 12) + 12) % 12];
   if (drum !== undefined) trigger(drum);
 });
 
-loadStateFromUrl(); // before the UI builds, so bars render the loaded patch
 const voices = $('#voices');
 for (let d = 0; d < 3; d++) voices.appendChild(buildVoice(d));
 buildMaster();
 buildMidiStrip();
+buildPresets();
 buildDevModal();
 buildHelp();
 boot().catch((err) => console.error('boot failed:', err));

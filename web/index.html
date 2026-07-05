@@ -122,6 +122,13 @@
     display: flex;
     align-items: center;
     gap: 14px;
+  }
+  #strip {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px 32px;
+    flex-wrap: wrap;
     background: var(--panel);
     padding: 12px 20px;
     margin-top: 20px;
@@ -129,6 +136,25 @@
     font-size: 12px;
     color: var(--dim);
   }
+  #presets {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  #presets .tag { color: var(--faint); letter-spacing: 2px; margin-right: 6px; }
+  #presets .slot {
+    background: var(--inset);
+    border: none;
+    color: var(--faint);
+    font: inherit;
+    width: 28px;
+    padding: 4px 0;
+    cursor: pointer;
+  }
+  #presets .slot.filled { color: var(--idle); }
+  #presets .slot.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  #presets .hint { color: var(--faint); min-width: 64px; }
+  #presets .hint.accent { color: var(--accent); }
   #midi .tag { color: var(--faint); letter-spacing: 2px; }
   #midi select {
     background: var(--inset);
@@ -150,7 +176,7 @@
   #midi .learn:hover { color: var(--idle); }
   #midi .learn.on { color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); }
   #midi .learn:disabled { opacity: 0.4; cursor: default; }
-  #midi .status { flex: 1; text-align: right; }
+  #midi .status { text-align: right; }
   #midi .status.accent { color: var(--accent); }
   .bar:hover { filter: brightness(1.18); }
   .bar.armed { box-shadow: 0 0 0 1px var(--accent); }
@@ -251,7 +277,10 @@
   <div id="locked" hidden>MIDI received &#183; audio is locked by the browser &#183; click anywhere</div>
   <div id="voices"></div>
   <div id="master"></div>
-  <div id="midi"></div>
+  <div id="strip">
+    <div id="presets"></div>
+    <div id="midi"></div>
+  </div>
   <footer>
     <span class="brand"><span class="mark">&#9670;</span> zygfred <span class="sub">&#183; FM drums</span></span>
     <span>a / s / d trigger &#183; <button id="help-open" title="help">?</button> <button id="dev-open" title="theme">&#9881;</button></span>
@@ -266,8 +295,8 @@
       <p>the last hit&#8217;s waveform &#8212; left channel, before the master effects</p>
       <h2>MIDI</h2>
       <p>pick a channel (or Omni) &#183; <span class="key">learn</span>: click learn, click a slider, turn a knob on your controller &#183; mappings persist in this browser</p>
-      <h2>PATCH</h2>
-      <p>the whole patch lives in the URL &#8212; tweak something, then copy the address to share or bookmark the sound</p>
+      <h2>PRESETS</h2>
+      <p>hold a slot for a moment to save the current patch &#183; click a slot (or press <span class="key">1&#8211;8</span>) to load &#183; stored in this browser</p>
       <h2>THEME</h2>
       <p>&#9881; in the footer &#183; per-voice colors, surface, chassis &#183; persists in this browser</p>
       <h2>APP</h2>
