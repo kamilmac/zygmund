@@ -183,7 +183,7 @@
   footer .brand { color: var(--idle); font-weight: 700; letter-spacing: 2px; }
   footer .brand .mark { color: var(--accent); }
   footer .brand .sub { color: var(--faint); font-weight: 400; letter-spacing: 1px; }
-  #dev-open {
+  #dev-open, #help-open {
     background: none;
     border: none;
     color: var(--faint);
@@ -191,7 +191,29 @@
     cursor: pointer;
     padding: 0 2px;
   }
-  #dev-open:hover { color: var(--accent); }
+  #dev-open:hover, #help-open:hover { color: var(--accent); }
+  #help {
+    position: fixed;
+    inset: 0;
+    background: color-mix(in srgb, var(--bg) 82%, transparent);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 25;
+  }
+  #help[hidden] { display: none; }
+  #help .sheet {
+    background: var(--panel);
+    padding: 24px 28px;
+    width: min(560px, calc(100% - 48px));
+    max-height: 80vh;
+    overflow-y: auto;
+    box-shadow: 0 6px 30px color-mix(in srgb, #000 45%, transparent);
+  }
+  #help h2 { color: var(--idle); font-size: 12px; letter-spacing: 2px; margin: 16px 0 4px; }
+  #help h2:first-child { margin-top: 0; }
+  #help p { color: var(--dim); font-size: 12px; margin: 0; }
+  #help .key { color: var(--idle); }
   #dev {
     position: fixed;
     right: 22px;
@@ -232,8 +254,26 @@
   <div id="midi"></div>
   <footer>
     <span class="brand"><span class="mark">&#9670;</span> zygfred <span class="sub">&#183; FM drums</span></span>
-    <span>a / s / d trigger &#183; click pads &#183; drag or scroll the bars &#183; <button id="dev-open" title="theme">&#9881;</button></span>
+    <span>a / s / d trigger &#183; <button id="help-open" title="help">?</button> <button id="dev-open" title="theme">&#9881;</button></span>
   </footer>
+  <div id="help" hidden>
+    <div class="sheet">
+      <h2>TRIGGER</h2>
+      <p><span class="key">a / s / d</span> play kick / snare / hihat &#183; so does any MIDI note with a C / D / E pitch class, velocity-sensitive &#183; clicking the pads works too</p>
+      <h2>BARS</h2>
+      <p>click or drag to set &#183; scroll to nudge &#183; the white tick that flashes after a hit shows where <span class="key">Rand</span> actually landed that hit</p>
+      <h2>SCOPE</h2>
+      <p>the last hit&#8217;s waveform &#8212; left channel, before the master effects</p>
+      <h2>MIDI</h2>
+      <p>pick a channel (or Omni) &#183; <span class="key">learn</span>: click learn, click a slider, turn a knob on your controller &#183; mappings persist in this browser</p>
+      <h2>PATCH</h2>
+      <p>the whole patch lives in the URL &#8212; tweak something, then copy the address to share or bookmark the sound</p>
+      <h2>THEME</h2>
+      <p>&#9881; in the footer &#183; per-voice colors, surface, chassis &#183; persists in this browser</p>
+      <h2>APP</h2>
+      <p>install via Chrome (address-bar install icon) for a dock app where MIDI makes sound without clicking first</p>
+    </div>
+  </div>
   <div id="dev" hidden>
     <div class="dev-row"><span>surface</span><input type="color" id="dev-surface"></div>
     <div class="dev-row"><span>kick</span><input type="color" id="dev-kick"></div>

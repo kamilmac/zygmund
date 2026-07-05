@@ -514,6 +514,14 @@ function buildDevModal() {
   $('#dev-open').addEventListener('click', () => { modal.hidden = !modal.hidden; });
 }
 
+function buildHelp() {
+  const help = $('#help');
+  $('#help-open').addEventListener('click', () => { help.hidden = false; });
+  help.addEventListener('pointerdown', (e) => {
+    if (e.target === help) help.hidden = true; // backdrop click closes; the sheet doesn't
+  });
+}
+
 // ---------- boot ----------
 
 async function boot() {
@@ -558,6 +566,7 @@ document.addEventListener('keydown', wake, { capture: true });
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     disarmLearn();
+    $('#help').hidden = true;
     return;
   }
   if (e.repeat || e.metaKey || e.ctrlKey || e.target.tagName === 'SELECT') return;
@@ -573,4 +582,5 @@ for (let d = 0; d < 3; d++) voices.appendChild(buildVoice(d));
 buildMaster();
 buildMidiStrip();
 buildDevModal();
+buildHelp();
 boot().catch((err) => console.error('boot failed:', err));
