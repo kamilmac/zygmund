@@ -9,8 +9,7 @@
 <meta name="theme-color" content="#0b0b0b">
 <style>
   :root {
-    /* two base colors (surface -> bg, accent); every other shade is computed by applyTheme().
-       fallbacks = applyTheme defaults: neutral dark, white chassis, warm->cool voices */
+    /* the palette: near-black surface, white chassis, cyan/pink/yellow voices */
     --accent: #f0eeea;
     --voice0: #7dc9d1;
     --voice1: #b8486d;
@@ -106,6 +105,14 @@
     height: 100%;
     background: repeating-linear-gradient(90deg, var(--accent) 0 6px, transparent 6px 8px);
     pointer-events: none;
+  }
+  .range {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    pointer-events: none;
+    display: none;
   }
   .tick {
     position: absolute;
@@ -219,7 +226,7 @@
   footer .brand { color: var(--idle); font-weight: 700; letter-spacing: 2px; }
   footer .brand .mark { color: var(--accent); }
   footer .brand .sub { color: var(--faint); font-weight: 400; letter-spacing: 1px; }
-  #dev-open, #help-open {
+  #help-open {
     background: none;
     border: none;
     color: var(--faint);
@@ -227,7 +234,7 @@
     cursor: pointer;
     padding: 0 2px;
   }
-  #dev-open:hover, #help-open:hover { color: var(--accent); }
+  #help-open:hover { color: var(--accent); }
   #help {
     position: fixed;
     inset: 0;
@@ -250,37 +257,6 @@
   #help h2:first-child { margin-top: 0; }
   #help p { color: var(--dim); font-size: 12px; margin: 0; }
   #help .key { color: var(--idle); }
-  #dev {
-    position: fixed;
-    right: 22px;
-    bottom: 58px;
-    background: var(--panel);
-    padding: 20px;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    box-shadow: 0 6px 30px color-mix(in srgb, #000 45%, transparent);
-    z-index: 20;
-  }
-  #dev[hidden] { display: none; }
-  .dev-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; color: var(--dim); }
-  .dev-row input {
-    width: 44px;
-    height: 26px;
-    border: none;
-    background: var(--inset);
-    padding: 2px;
-    cursor: pointer;
-  }
-  #dev-reset {
-    background: color-mix(in srgb, var(--accent) 7%, transparent);
-    border: none;
-    color: var(--dim);
-    font: inherit;
-    padding: 4px 0;
-    cursor: pointer;
-  }
-  #dev-reset:hover { color: var(--idle); }
 </style>
 </head>
 <body>
@@ -291,33 +267,23 @@
   <div id="midi"></div>
   <footer>
     <span class="brand"><span class="mark">&#9670;</span> zygfred <span class="sub">&#183; FM drums</span></span>
-    <span><button id="help-open" title="help">?</button> <button id="dev-open" title="theme">&#9881;</button></span>
+    <span><button id="help-open" title="help">?</button></span>
   </footer>
   <div id="help" hidden>
     <div class="sheet">
       <h2>TRIGGER</h2>
       <p><span class="key">a / s / d</span> play kick / snare / hihat &#183; so does any MIDI note with a C / D / E pitch class, velocity-sensitive &#183; clicking the pads works too</p>
       <h2>BARS</h2>
-      <p>click or drag to set &#183; scroll to nudge &#183; the white tick that flashes after a hit shows where <span class="key">Rand</span> actually landed that hit</p>
+      <p>click or drag to set &#183; scroll to nudge &#183; the soft band is <span class="key">Rand</span>&#8217;s reach &#8212; each hit lands somewhere inside it, and the white tick flashes where</p>
       <h2>SCOPE</h2>
       <p>the last hit&#8217;s waveform &#8212; left channel, before the master effects</p>
       <h2>MIDI</h2>
       <p>pick a channel (or Omni) &#183; <span class="key">learn</span>: click learn, click a slider, turn a knob on your controller &#183; mappings persist in this browser</p>
       <h2>PRESETS</h2>
       <p>hold a slot for a moment to save the current patch &#183; click a slot (or press <span class="key">1&#8211;8</span>) to load &#183; stored in this browser</p>
-      <h2>THEME</h2>
-      <p>&#9881; in the footer &#183; per-voice colors, surface, chassis &#183; persists in this browser</p>
       <h2>APP</h2>
       <p>install via Chrome (address-bar install icon) for a dock app where MIDI makes sound without clicking first</p>
     </div>
-  </div>
-  <div id="dev" hidden>
-    <div class="dev-row"><span>surface</span><input type="color" id="dev-surface"></div>
-    <div class="dev-row"><span>kick</span><input type="color" id="dev-kick"></div>
-    <div class="dev-row"><span>snare</span><input type="color" id="dev-snare"></div>
-    <div class="dev-row"><span>hihat</span><input type="color" id="dev-hihat"></div>
-    <div class="dev-row"><span>master</span><input type="color" id="dev-accent"></div>
-    <button id="dev-reset">reset</button>
   </div>
   <script type="module" src="./main.js"></script>
 </body>

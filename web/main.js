@@ -98,7 +98,28 @@ function makeBar({ id, name, getNorm, setNorm, getLabel, discreteSteps }) {
   return { bar, val, refresh };
 }
 
-const tickSetters = [[], [], []]; // [drum][param] -> (l, r), sound params only
+const tickSetters = [[], [], []]; // [drum][param] -> (l), sound params only
+const rangeEls = [[], [], []]; // [drum][param] -> the rand-range band element
+
+// the band spans value ± rand*15% — the region a hit can actually land in
+function updateBands(drum) {
+  const rand = drums[drum][P_RAND];
+  for (let pi = 0; pi < 9; pi++) {
+    const el = rangeEls[drum][pi];
+    if (!el) continue;
+    if (rand <= 0) {
+      el.style.display = 'none';
+      continue;
+    }
+    const v = drums[drum][pi];
+    const half = rand * 0.15;
+    const lo = Math.max(0, v - half);
+    const hi = Math.min(1, v + half);
+    el.style.display = 'block';
+    el.style.left = `${lo * 100}%`;
+    el.style.width = `${(hi - lo) * 100}%`;
+  }
+}
 
 function paramRow(drum, pi) {
   const row = document.createElement('div');
@@ -110,10 +131,17 @@ function paramRow(drum, pi) {
     id: drum * PARAMS.length + pi,
     name: `${DRUMS[drum].name} ${PARAMS[pi]}`,
     getNorm: () => drums[drum][pi],
-    setNorm: (n) => { drums[drum][pi] = n; }, // params are read per hit, at trigger time
+    setNorm: (n) => {
+      drums[drum][pi] = n;
+      updateBands(drum); // rand's reach depends on both the value and Rand itself
+    },
     getLabel: () => `${Math.round(drums[drum][pi] * 100)}`,
   });
   if (pi < 9) {
+    const range = document.createElement('div');
+    range.className = 'range';
+    bar.append(range);
+    rangeEls[drum][pi] = range;
     // per-hit randomisation marker: where the left take actually landed on the last trigger
     const tick = document.createElement('div');
     tick.className = 'tick';
@@ -194,7 +222,7 @@ function trigger(drum, vel = 0.9) {
     width: p[P_WIDTH],
     len: 0.08 + 1.8 * p[6],
   });
-  for (let i = 0; i < 9; i++) tickSetters[drum][i]?.(vl[i]);
+  if (rand > 0) for (let i = 0; i < 9; i++) tickSetters[drum][i]?.(vl[i]);
   drawScope(drum, vl);
   const panel = document.querySelectorAll('.voice')[drum];
   panel.classList.remove('hit');
@@ -396,83 +424,7 @@ function buildMidiStrip() {
   strip.append(tag, chSel, learnBtn, status);
 }
 
-// ---------- theme (dev modal: 2 base colors, every other shade derived) ----------
-
-const THEME_KEY = 'zygfred-theme';
-const THEME_DEFAULT = {
-  surface: '#0b0b0b',
-  accent: '#f0eeea', // master + chassis (title, power, learn)
-  kick: '#7dc9d1',
-  snare: '#b8486d',
-  hihat: '#d8bf5f',
-};
-const VOICE_KEYS = ['kick', 'snare', 'hihat'];
-
-function hexToHsl(hex) {
-  const n = parseInt(hex.slice(1), 16);
-  const r = ((n >> 16) & 255) / 255;
-  const g = ((n >> 8) & 255) / 255;
-  const b = (n & 255) / 255;
-  const mx = Math.max(r, g, b);
-  const mn = Math.min(r, g, b);
-  const l = (mx + mn) / 2;
-  if (mx === mn) return [0, 0, l * 100];
-  const d = mx - mn;
-  const s = d / (l > 0.5 ? 2 - mx - mn : mx + mn);
-  let h;
-  if (mx === r) h = (g - b) / d + (g < b ? 6 : 0);
-  else if (mx === g) h = (b - r) / d + 2;
-  else h = (r - g) / d + 4;
-  return [h * 60, s * 100, l * 100];
-}
-
-function applyTheme(theme) {
-  const [h, s, l] = hexToHsl(theme.surface);
-  // derived shades: lightness steps for chrome, desaturated lifts for text
-  const shade = (dl, ss = s) => `hsl(${h.toFixed(0)} ${ss.toFixed(0)}% ${Math.min(96, Math.max(0, l + dl)).toFixed(1)}%)`;
-  const text = (ll) => `hsl(${h.toFixed(0)} 13% ${ll}%)`;
-  const root = document.documentElement.style;
-  root.setProperty('--bg', shade(0));
-  root.setProperty('--panel', shade(3));
-  root.setProperty('--inset', shade(-1.5));
-  root.setProperty('--track', shade(8.5));
-  root.setProperty('--faint', text(32));
-  root.setProperty('--dim', text(42));
-  root.setProperty('--idle', text(69));
-  root.setProperty('--accent', theme.accent);
-  VOICE_KEYS.forEach((k, i) => root.setProperty(`--voice${i}`, theme[k]));
-}
-
-function buildDevModal() {
-  const modal = $('#dev');
-  const fields = ['surface', 'kick', 'snare', 'hihat', 'accent'];
-  const inputs = Object.fromEntries(fields.map((f) => [f, $(`#dev-${f}`)]));
-  let theme = { ...THEME_DEFAULT };
-  try {
-    const t = JSON.parse(localStorage.getItem(THEME_KEY) || '{}');
-    if (t.kick) theme = { ...theme, ...t };
-    else if (t.surface) theme.surface = t.surface; // pre-per-voice schema: keep surface only
-  } catch { /* defaults */ }
-
-  const refresh = () => {
-    fields.forEach((f) => { inputs[f].value = theme[f]; });
-    applyTheme(theme);
-    if (audioCtx) for (let d = 0; d < 3; d++) drawScope(d); // scopes read their voice accent
-  };
-  const update = () => {
-    fields.forEach((f) => { theme[f] = inputs[f].value; });
-    localStorage.setItem(THEME_KEY, JSON.stringify(theme));
-    refresh();
-  };
-  refresh();
-  fields.forEach((f) => inputs[f].addEventListener('input', update));
-  $('#dev-reset').addEventListener('click', () => {
-    theme = { ...THEME_DEFAULT };
-    localStorage.setItem(THEME_KEY, JSON.stringify(theme));
-    refresh(); // refresh writes theme -> inputs; update() would read stale inputs back
-  });
-  $('#dev-open').addEventListener('click', () => { modal.hidden = !modal.hidden; });
-}
+// ---------- help ----------
 
 function buildHelp() {
   const help = $('#help');
@@ -502,6 +454,7 @@ function applyState(st) {
   const base = DRUMS.length * PARAMS.length;
   st.master.forEach((v, mi) => { if (mi !== 3) controls[base + mi]?.apply(v); });
   controls[base + 3]?.apply(st.bits / (BIT_OPTIONS.length - 1));
+  for (let d = 0; d < 3; d++) updateBands(d);
   if (audioCtx) for (let d = 0; d < 3; d++) drawScope(d);
 }
 
@@ -639,6 +592,6 @@ for (let d = 0; d < 3; d++) voices.appendChild(buildVoice(d));
 buildMaster();
 buildMidiStrip();
 buildPresets();
-buildDevModal();
 buildHelp();
+for (let d = 0; d < 3; d++) updateBands(d);
 boot().catch((err) => console.error('boot failed:', err));
