@@ -437,7 +437,7 @@ function loadStateFromUrl() {
 // ---------- theme (dev modal: 2 base colors, every other shade derived) ----------
 
 const THEME_KEY = 'zygfred-theme';
-const THEME_DEFAULT = { surface: '#141414', accent: '#e1ad6d' };
+const THEME_DEFAULT = { surface: '#141414', accent: '#b7f34d' };
 
 function hexToHsl(hex) {
   const n = parseInt(hex.slice(1), 16);
