@@ -154,10 +154,10 @@ function paramRow(drum, pi) {
       const ticks = bar.querySelectorAll('.tick');
       if (ticks.length > 6) ticks[0].remove();
       requestAnimationFrame(() => requestAnimationFrame(() => {
-        t.style.transition = 'opacity 2.2s ease-out 0.3s';
+        t.style.transition = 'opacity 1s ease-out 0.15s';
         t.style.opacity = 0;
       }));
-      setTimeout(() => t.remove(), 2700);
+      setTimeout(() => t.remove(), 1300);
     };
   }
   row.append(label, bar, val);
