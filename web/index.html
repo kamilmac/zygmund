@@ -17,6 +17,26 @@
     --track: #221e2b;
   }
   * { box-sizing: border-box; margin: 0; }
+  /* film-tape grain: feTurbulence tile jumping in steps(1), strength via --grain (dev modal) */
+  body::after {
+    content: "";
+    position: fixed;
+    inset: -60%;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    opacity: var(--grain, 0.05);
+    pointer-events: none;
+    z-index: 5;
+    animation: grain 0.7s steps(1) infinite;
+  }
+  @keyframes grain {
+    0%, 100% { transform: translate(0, 0); }
+    14% { transform: translate(-3%, -7%); }
+    28% { transform: translate(5%, -3%); }
+    42% { transform: translate(-6%, 4%); }
+    56% { transform: translate(2%, 7%); }
+    70% { transform: translate(7%, 1%); }
+    84% { transform: translate(-4%, 6%); }
+  }
   body {
     background: var(--bg);
     color: var(--idle);
@@ -185,13 +205,33 @@
   }
   #dev[hidden] { display: none; }
   .dev-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; color: var(--dim); }
-  .dev-row input {
-    width: 44px;
-    height: 26px;
-    border: none;
-    border-radius: 6px;
-    background: var(--inset);
-    padding: 2px;
+  #dev-hue {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 190px;
+    height: 10px;
+    border-radius: 5px;
+    background: linear-gradient(90deg,
+      hsl(0 80% 55%), hsl(60 80% 55%), hsl(120 80% 55%),
+      hsl(180 80% 55%), hsl(240 80% 55%), hsl(300 80% 55%), hsl(360 80% 55%));
+    cursor: pointer;
+  }
+  #dev-hue::-webkit-slider-thumb,
+  #dev-grain::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 2px solid #fff;
+  }
+  #dev-grain {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 190px;
+    height: 10px;
+    border-radius: 5px;
+    background: linear-gradient(90deg, var(--inset), var(--idle));
     cursor: pointer;
   }
   #dev-reset {
@@ -238,8 +278,10 @@
   <div id="midi"></div>
   <footer>a / s / d trigger &#183; click pads &#183; drag or scroll the bars &#183; <span class="l">tick</span> = where the last hit landed (Rand) &#183; <button id="dev-open" title="theme">&#9881;</button></footer>
   <div id="dev" hidden>
-    <div class="dev-row"><span>surface</span><input type="color" id="dev-surface"></div>
-    <div class="dev-row"><span>accent</span><input type="color" id="dev-accent"></div>
+    <div class="dev-row"><span>hue</span><span id="dev-hue-val"></span></div>
+    <input type="range" id="dev-hue" min="0" max="360" step="1">
+    <div class="dev-row"><span>grain</span><span id="dev-grain-val"></span></div>
+    <input type="range" id="dev-grain" min="0" max="100" step="1">
     <button id="dev-reset">reset</button>
   </div>
   <div id="power">
