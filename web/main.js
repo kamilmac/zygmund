@@ -102,8 +102,11 @@ const tickSetters = [[], [], []]; // [drum][param] -> (l), sound params only
 const rangeEls = [[], [], []]; // [drum][param] -> the rand-range band element
 
 // the band spans value ± rand*15% — the region a hit can actually land in
+const randRows = [];
+
 function updateBands(drum) {
   const rand = drums[drum][P_RAND];
+  randRows[drum]?.classList.toggle('rand-on', rand > 0);
   for (let pi = 0; pi < 9; pi++) {
     const el = rangeEls[drum][pi];
     if (!el) continue;
@@ -142,18 +145,19 @@ function paramRow(drum, pi) {
     range.className = 'range';
     bar.append(range);
     rangeEls[drum][pi] = range;
-    // per-hit randomisation marker: where the left take actually landed on the last trigger
-    const tick = document.createElement('div');
-    tick.className = 'tick';
-    bar.append(tick);
+    // every hit spawns its own tick that decays — the fading trail shows Rand's distribution
     tickSetters[drum][pi] = (l) => {
-      tick.style.transition = 'none';
-      tick.style.left = `${l * 100}%`;
-      tick.style.opacity = 1;
+      const t = document.createElement('div');
+      t.className = 'tick';
+      t.style.left = `${l * 100}%`;
+      bar.append(t);
+      const ticks = bar.querySelectorAll('.tick');
+      if (ticks.length > 6) ticks[0].remove();
       requestAnimationFrame(() => requestAnimationFrame(() => {
-        tick.style.transition = 'opacity 1.2s ease-out 0.5s';
-        tick.style.opacity = 0;
+        t.style.transition = 'opacity 2.2s ease-out 0.3s';
+        t.style.opacity = 0;
       }));
+      setTimeout(() => t.remove(), 2700);
     };
   }
   row.append(label, bar, val);
@@ -255,6 +259,7 @@ function buildVoice(drum) {
   for (let pi = 6; pi < PARAMS.length; pi++) {
     const row = paramRow(drum, pi);
     if (pi === P_HAAS) row.classList.add('sect'); // body | stereo+gain
+    if (pi === P_RAND) randRows[drum] = row;
     panel.appendChild(row);
   }
   return panel;
