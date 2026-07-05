@@ -2,6 +2,7 @@
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
 export const __wbg_engine_free: (a: number, b: number) => void;
+export const capture_envelope: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const capture_spectrogram: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
 export const engine_left_ptr: (a: number) => number;
 export const engine_new: (a: number) => number;

@@ -27,6 +27,12 @@ export class Engine {
 }
 
 /**
+ * Render a dry voice offline and return a min/max envelope: `2 * cols` values, [min, max] per
+ * column, spanning `seconds`. Runs on the main thread in its own wasm instance.
+ */
+export function capture_envelope(params: Float32Array, sample_rate: number, cols: number, seconds: number): Float32Array;
+
+/**
  * Render a dry voice offline and return a log-frequency spectrogram: `rows * cols` values in
  * 0..1 (dB-mapped, -60 dB floor), row-major, row 0 = highest frequency. `seconds` sets the
  * analysis span. Runs on the main thread in its own wasm instance — never touches the engine.
@@ -38,6 +44,7 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_engine_free: (a: number, b: number) => void;
+    readonly capture_envelope: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly capture_spectrogram: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
     readonly engine_left_ptr: (a: number) => number;
     readonly engine_new: (a: number) => number;

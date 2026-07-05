@@ -1,6 +1,6 @@
 // zygfred web UI: builds the three-voice param matrix from config, talks to the AudioWorklet
 // over its message port, and renders per-voice scopes via a main-thread wasm instance.
-import init, { capture_spectrogram } from './pkg/zygfred_web.js';
+import init, { capture_envelope, capture_spectrogram } from './pkg/zygfred_web.js';
 
 const PARAMS = ['Tune', 'Ratio', 'FM', 'FMDec', 'PEnv', 'PDec', 'Decay', 'Snap', 'Tone', 'Haas', 'Rand', 'Width', 'Vol'];
 const P_HAAS = 9;
@@ -138,17 +138,12 @@ const scopeCanvases = [];
 const SPEC_COLS = 256;
 const SPEC_ROWS = 56;
 
-function accentRgb() {
-  const probe = document.createElement('canvas');
-  probe.width = probe.height = 1;
-  const pg = probe.getContext('2d');
-  pg.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--accent');
-  pg.fillRect(0, 0, 1, 1);
-  return pg.getImageData(0, 0, 1, 1).data;
-}
+const F_MIN = 30;
+const F_MAX = 12000;
 
-// spectrogram of the hit: time -> across (whole hit, decay-adaptive), log frequency 30Hz..12kHz
-// -> up, accent-color intensity = energy (dB)
+// scope of the hit: min/max amplitude band (DAW-style) + the analytic pitch curve overlaid on a
+// log-frequency scale. The curve is the synthesis equation itself — exact, no analysis — and it
+// ends where the amp envelope dies.
 function drawScope(drum, vl) {
   const canvas = scopeCanvases[drum];
   if (!canvas || !audioCtx) return;
@@ -156,25 +151,45 @@ function drawScope(drum, vl) {
   // time span = where the amp envelope reaches -60dB (dec rate = 40 - 37*decay, env = e^-t*dec)
   const decRate = 40 - 37 * take[6];
   const seconds = Math.min(1.2, Math.max(0.15, 6.9 / decRate));
-  const mags = capture_spectrogram(take, audioCtx.sampleRate, SPEC_COLS, SPEC_ROWS, seconds);
-  const [ar, ag, ab] = accentRgb();
-  const img = new ImageData(SPEC_COLS, SPEC_ROWS);
-  for (let i = 0; i < SPEC_ROWS * SPEC_COLS; i++) {
-    const v = mags[i];
-    const hot = Math.max(0, v - 0.75) * 2.4; // hottest energy glows toward white
-    img.data[i * 4] = Math.min(255, ar + (255 - ar) * hot);
-    img.data[i * 4 + 1] = Math.min(255, ag + (255 - ag) * hot);
-    img.data[i * 4 + 2] = Math.min(255, ab + (255 - ab) * hot);
-    img.data[i * 4 + 3] = Math.round(v ** 1.1 * 255); // gamma tames the noise floor
-  }
-  const off = document.createElement('canvas');
-  off.width = SPEC_COLS;
-  off.height = SPEC_ROWS;
-  off.getContext('2d').putImageData(img, 0, 0);
+  const env = capture_envelope(take, audioCtx.sampleRate, SPEC_COLS, seconds);
   const g = canvas.getContext('2d');
-  g.clearRect(0, 0, canvas.width, canvas.height);
-  g.imageSmoothingEnabled = true;
-  g.drawImage(off, 0, 0, canvas.width, canvas.height);
+  const { width: w, height: h } = canvas;
+  g.clearRect(0, 0, w, h);
+  const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent');
+
+  // amplitude band: fill between per-column min and max
+  const mid = h / 2;
+  const yAmp = (v) => mid - v * (mid - 2);
+  g.beginPath();
+  for (let c = 0; c < SPEC_COLS; c++) {
+    const x = (c / (SPEC_COLS - 1)) * w;
+    c === 0 ? g.moveTo(x, yAmp(env[2 * c + 1])) : g.lineTo(x, yAmp(env[2 * c + 1]));
+  }
+  for (let c = SPEC_COLS - 1; c >= 0; c--) {
+    g.lineTo((c / (SPEC_COLS - 1)) * w, yAmp(env[2 * c]));
+  }
+  g.closePath();
+  g.globalAlpha = 0.55;
+  g.fillStyle = accent;
+  g.fill();
+  g.globalAlpha = 1;
+
+  // pitch curve: f(t) = base * (1 + PEnv * e^(-t*PDec)), log-mapped, drawn until the sound dies
+  const base = 30 * 300 ** take[0];
+  const penv = take[4] * 4;
+  const pdec = 6 + 80 * take[5];
+  const yFreq = (f) => h * (1 - Math.log(Math.min(Math.max(f, F_MIN), F_MAX) / F_MIN) / Math.log(F_MAX / F_MIN));
+  g.beginPath();
+  for (let c = 0; c < SPEC_COLS; c++) {
+    const t = (c / (SPEC_COLS - 1)) * seconds;
+    if (Math.exp(-t * decRate) < 0.03) break; // envelope dead — stop the curve
+    const x = (c / (SPEC_COLS - 1)) * w;
+    const y = yFreq(base * (1 + penv * Math.exp(-t * pdec)));
+    c === 0 ? g.moveTo(x, y) : g.lineTo(x, y);
+  }
+  g.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+  g.lineWidth = 2;
+  g.stroke();
 }
 
 // ---------- voices ----------

@@ -304,6 +304,37 @@ pub fn capture_spectrogram(
     out
 }
 
+/// Render a dry voice offline and return a min/max envelope: `2 * cols` values, [min, max] per
+/// column, spanning `seconds`. Runs on the main thread in its own wasm instance.
+#[wasm_bindgen]
+pub fn capture_envelope(params: &[f32], sample_rate: f32, cols: usize, seconds: f32) -> Vec<f32> {
+    let mut snd = [0.0f32; 9];
+    for i in 0..std::cmp::Ord::min(9, params.len()) {
+        snd[i] = params[i];
+    }
+    let mut v: Box<dyn AudioUnit> = Box::new(drum_mono(snd, 0.95));
+    v.set_sample_rate(sample_rate as f64);
+    v.allocate();
+    let n = std::cmp::Ord::max((seconds * sample_rate) as usize, cols);
+    let step = std::cmp::Ord::max(n / cols, 1);
+    let mut out = vec![0.0f32; 2 * cols];
+    for c in 0..cols {
+        let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+        for _ in 0..step {
+            let s = v.get_mono();
+            if s < lo {
+                lo = s;
+            }
+            if s > hi {
+                hi = s;
+            }
+        }
+        out[2 * c] = lo;
+        out[2 * c + 1] = hi;
+    }
+    out
+}
+
 /// Iterative radix-2 FFT, in place. Length must be a power of two.
 fn fft_inplace(re: &mut [f32], im: &mut [f32]) {
     use core::f32::consts::PI as PI32;
