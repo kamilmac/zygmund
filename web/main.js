@@ -138,12 +138,7 @@ const scopeCanvases = [];
 const SPEC_COLS = 256;
 const SPEC_ROWS = 56;
 
-const F_MIN = 30;
-const F_MAX = 12000;
-
-// scope of the hit: min/max amplitude band (DAW-style) + the analytic pitch curve overlaid on a
-// log-frequency scale. The curve is the synthesis equation itself — exact, no analysis — and it
-// ends where the amp envelope dies.
+// scope of the hit: min/max amplitude band (DAW-style)
 function drawScope(drum, vl) {
   const canvas = scopeCanvases[drum];
   if (!canvas || !audioCtx) return;
@@ -173,23 +168,6 @@ function drawScope(drum, vl) {
   g.fillStyle = accent;
   g.fill();
   g.globalAlpha = 1;
-
-  // pitch curve: f(t) = base * (1 + PEnv * e^(-t*PDec)), log-mapped, drawn until the sound dies
-  const base = 30 * 300 ** take[0];
-  const penv = take[4] * 4;
-  const pdec = 6 + 80 * take[5];
-  const yFreq = (f) => h * (1 - Math.log(Math.min(Math.max(f, F_MIN), F_MAX) / F_MIN) / Math.log(F_MAX / F_MIN));
-  g.beginPath();
-  for (let c = 0; c < SPEC_COLS; c++) {
-    const t = (c / (SPEC_COLS - 1)) * seconds;
-    if (Math.exp(-t * decRate) < 0.03) break; // envelope dead — stop the curve
-    const x = (c / (SPEC_COLS - 1)) * w;
-    const y = yFreq(base * (1 + penv * Math.exp(-t * pdec)));
-    c === 0 ? g.moveTo(x, y) : g.lineTo(x, y);
-  }
-  g.strokeStyle = 'rgba(255, 255, 255, 0.85)';
-  g.lineWidth = 2;
-  g.stroke();
 }
 
 // ---------- voices ----------
