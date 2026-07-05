@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>zygfred · FM drums</title>
+<style>
+  :root {
+    --accent: #ff965a;
+    --idle: #a5aab9;
+    --dim: #5f6278;
+    --bg: #100e14;
+    --panel: #17141d;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--idle);
+    font: 13px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px 16px;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  h1 {
+    color: var(--accent);
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    margin-bottom: 20px;
+  }
+  h1 .sub { color: var(--dim); font-weight: 400; }
+  #voices {
+    display: flex;
+    gap: 14px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .voice {
+    background: var(--panel);
+    border: 1px solid var(--dim);
+    border-radius: 10px;
+    padding: 14px;
+    width: 270px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .voice.hit { animation: flash 0.15s ease-out; }
+  @keyframes flash {
+    0% { border-color: var(--accent); box-shadow: 0 0 14px rgba(255, 150, 90, 0.45); }
+    100% { border-color: var(--dim); box-shadow: none; }
+  }
+  .pad {
+    background: none;
+    border: 1px solid var(--dim);
+    border-radius: 6px;
+    color: var(--accent);
+    font: inherit;
+    font-weight: 700;
+    letter-spacing: 1px;
+    padding: 8px;
+    cursor: pointer;
+    margin-bottom: 6px;
+  }
+  .pad:active { background: rgba(255, 150, 90, 0.15); }
+  .pad .key {
+    color: var(--dim);
+    font-weight: 400;
+    border: 1px solid var(--dim);
+    border-radius: 3px;
+    padding: 0 5px;
+    margin-left: 6px;
+  }
+  .row { display: flex; align-items: center; gap: 8px; }
+  .label { width: 52px; color: var(--dim); flex: none; }
+  .row .val { width: 48px; text-align: right; color: var(--idle); flex: none; }
+  .bar {
+    flex: 1;
+    height: 14px;
+    border-radius: 3px;
+    background: repeating-linear-gradient(90deg, #262230 0 6px, var(--panel) 6px 8px);
+    cursor: ew-resize;
+    touch-action: none;
+    overflow: hidden;
+  }
+  .fill {
+    height: 100%;
+    background: repeating-linear-gradient(90deg, var(--accent) 0 6px, transparent 6px 8px);
+    pointer-events: none;
+  }
+  .scope {
+    width: 100%;
+    height: 56px;
+    background: var(--bg);
+    border: 1px solid #262230;
+    border-radius: 4px;
+    margin: 4px 0;
+  }
+  #master {
+    display: flex;
+    gap: 22px;
+    flex-wrap: wrap;
+    justify-content: center;
+    background: var(--panel);
+    border: 1px solid var(--dim);
+    border-radius: 10px;
+    padding: 12px 18px;
+    margin-top: 14px;
+    width: min(842px, 100%);
+  }
+  #master .row { flex: 1; min-width: 200px; }
+  footer { color: var(--dim); margin-top: 16px; text-align: center; }
+  #power {
+    position: fixed;
+    inset: 0;
+    background: rgba(16, 14, 20, 0.94);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    z-index: 10;
+  }
+  #power button {
+    background: none;
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    color: var(--accent);
+    font: inherit;
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    padding: 14px 34px;
+    cursor: pointer;
+  }
+  #power button:hover { background: rgba(255, 150, 90, 0.12); }
+  #power .hint { color: var(--dim); }
+</style>
+</head>
+<body>
+  <h1>&#9670; zygfred <span class="sub">&#183; FM drums</span></h1>
+  <div id="voices"></div>
+  <div id="master"></div>
+  <footer>a / s / d trigger &#183; click pads &#183; drag or scroll the bars</footer>
+  <div id="power">
+    <button>&#9670; power on</button>
+    <div class="hint">browsers need a click before audio can start</div>
+  </div>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "name": "zygfred-web",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "zygfred_web_bg.wasm",
+    "zygfred_web.js",
+    "zygfred_web.d.ts"
+  ],
+  "main": "zygfred_web.js",
+  "types": "zygfred_web.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
