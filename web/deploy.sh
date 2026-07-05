@@ -8,6 +8,7 @@ SITE=$(mktemp -d)
 
 cp index.html main.js worklet.js worklet-polyfill.js "$SITE/"
 cp -R pkg "$SITE/pkg"
+rm -f "$SITE/pkg/.gitignore" # wasm-pack regenerates it with '*' — it would exclude pkg from the deploy commit
 touch "$SITE/.nojekyll"
 
 sed -i '' "s|\./main\.js|./main.js?v=$VER|" "$SITE/index.html"
