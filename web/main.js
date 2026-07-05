@@ -542,22 +542,30 @@ function buildPresets() {
     slotSyncs.push(sync);
     let hold = null;
     let held = false;
+    const disarm = () => {
+      clearTimeout(hold);
+      b.classList.remove('arming');
+    };
     b.addEventListener('pointerdown', () => {
       held = false;
+      b.classList.add('arming'); // charges toward accent for the hold duration
       hold = setTimeout(() => {
         held = true;
         presets[i] = snapshotState();
         localStorage.setItem(PRESET_KEY, JSON.stringify(presets));
         currentSlot = i;
         slotSyncs.forEach((f) => f());
+        b.classList.remove('arming');
         presetHint(`saved ${i}`);
       }, 600);
     });
     b.addEventListener('pointerup', () => {
-      clearTimeout(hold);
-      if (!held) loadPreset(i);
+      disarm();
+      if (held) return;
+      if (presets[i]) loadPreset(i);
+      else presetHint(`slot ${i} empty · hold to save`);
     });
-    b.addEventListener('pointerleave', () => clearTimeout(hold));
+    b.addEventListener('pointerleave', disarm);
     sync();
     strip.append(b);
   }
