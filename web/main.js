@@ -2,7 +2,8 @@
 // over its message port, and renders per-voice scopes via a main-thread wasm instance.
 import init, { capture_scope } from './pkg/zygfred_web.js';
 
-const PARAMS = ['Tune', 'Ratio', 'FM', 'FMDec', 'PEnv', 'PDec', 'Decay', 'Snap', 'Tone', 'Haas', 'Detune', 'Rand'];
+const PARAMS = ['Tune', 'Ratio', 'FM', 'FMDec', 'PEnv', 'PDec', 'Decay', 'Snap', 'Tone', 'Haas', 'Detune', 'Rand', 'Vol'];
+const P_VOL = 12; // per-voice gain, applied on the velocity path (voice amp is linear in vel)
 const DRUMS = [
   { name: 'KICK', key: 'A' },
   { name: 'SNARE', key: 'S' },
@@ -19,9 +20,9 @@ const MASTER = [
   { name: 'Volume', msg: 'volume', value: 0.7 },
 ];
 const DEFAULTS = [
-  [0.18, 0.10, 0.20, 0.70, 0.55, 0.65, 0.45, 0.10, 0.10, 0.10, 0.10, 0.15],
-  [0.42, 0.25, 0.40, 0.60, 0.20, 0.70, 0.25, 0.70, 0.50, 0.25, 0.30, 0.35],
-  [0.72, 0.45, 0.60, 0.20, 0.00, 0.50, 0.12, 0.60, 0.80, 0.35, 0.40, 0.40],
+  [0.18, 0.10, 0.20, 0.70, 0.55, 0.65, 0.45, 0.10, 0.10, 0.10, 0.10, 0.15, 1.00],
+  [0.42, 0.25, 0.40, 0.60, 0.20, 0.70, 0.25, 0.70, 0.50, 0.25, 0.30, 0.35, 1.00],
+  [0.72, 0.45, 0.60, 0.20, 0.00, 0.50, 0.12, 0.60, 0.80, 0.35, 0.40, 0.40, 1.00],
 ];
 // same trigger mapping as native: keys are semitones, pitch classes C/D/E hit kick/snare/hihat
 const KEY_SEMITONE = { a: 0, w: 1, s: 2, e: 3, d: 4, f: 5, t: 6, g: 7, y: 8, h: 9, u: 10, j: 11, k: 12 };
@@ -40,8 +41,8 @@ function send(msg) {
 
 // ---------- generic bar control ----------
 
-// registry of every learnable control, indexed by id: 0..35 drum params (drum*12+param),
-// 36..40 master — same id scheme as native zygfred's CC map
+// registry of every learnable control, indexed by id: drum params first (drum*13+param,
+// incl. per-voice Vol), then master
 const controls = [];
 
 function makeBar({ id, name, getNorm, setNorm, getLabel, discreteSteps }) {
@@ -110,16 +111,13 @@ function paramRow(drum, pi) {
     getLabel: () => `${Math.round(drums[drum][pi] * 100)}%`,
   });
   if (pi < 9) {
-    // per-hit randomisation markers: where the L/R takes actually landed on the last trigger
-    const tl = document.createElement('div');
-    tl.className = 'tick tick-l';
-    const tr = document.createElement('div');
-    tr.className = 'tick tick-r';
-    bar.append(tl, tr);
-    tickSetters[drum][pi] = (l, r) => {
-      tl.style.left = `${l * 100}%`;
-      tr.style.left = `${r * 100}%`;
-      tl.style.opacity = tr.style.opacity = 1;
+    // per-hit randomisation marker: where the left take actually landed on the last trigger
+    const tick = document.createElement('div');
+    tick.className = 'tick';
+    bar.append(tick);
+    tickSetters[drum][pi] = (l) => {
+      tick.style.left = `${l * 100}%`;
+      tick.style.opacity = 1;
     };
   }
   row.append(label, bar, val);
@@ -168,13 +166,13 @@ function trigger(drum, vel = 0.9) {
   }
   const det = p[10] * 40; // up to 40 cents L/R spread
   send({
-    type: 'trigger', vl, vr, vel,
+    type: 'trigger', vl, vr, vel: vel * p[P_VOL],
     mulL: 2 ** (-det / 2 / 1200),
     mulR: 2 ** (det / 2 / 1200),
     haas: p[9] * 0.03, // 0..30 ms inter-channel delay
     len: 0.08 + 1.8 * p[6],
   });
-  for (let i = 0; i < 9; i++) tickSetters[drum][i]?.(vl[i], vr[i]);
+  for (let i = 0; i < 9; i++) tickSetters[drum][i]?.(vl[i]);
   drawScope(drum, vl);
   const panel = document.querySelectorAll('.voice')[drum];
   panel.classList.remove('hit');
@@ -219,7 +217,7 @@ function buildMaster() {
     label.textContent = m.name;
     const isBits = m.msg === 'bits';
     const { bar, val } = makeBar({
-      id: 36 + mi,
+      id: DRUMS.length * PARAMS.length + mi,
       name: m.name,
       discreteSteps: isBits ? BIT_OPTIONS.length : 0,
       getNorm: () => (isBits ? bitsIdx / (BIT_OPTIONS.length - 1) : m.value),
@@ -370,6 +368,71 @@ function buildMidiStrip() {
   strip.append(tag, chSel, learnBtn, status);
 }
 
+// ---------- theme (dev modal: 2 base colors, every other shade derived) ----------
+
+const THEME_KEY = 'zygfred-theme';
+const THEME_DEFAULT = { surface: '#0d0b11', accent: '#ff965a' };
+
+function hexToHsl(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  const r = ((n >> 16) & 255) / 255;
+  const g = ((n >> 8) & 255) / 255;
+  const b = (n & 255) / 255;
+  const mx = Math.max(r, g, b);
+  const mn = Math.min(r, g, b);
+  const l = (mx + mn) / 2;
+  if (mx === mn) return [0, 0, l * 100];
+  const d = mx - mn;
+  const s = d / (l > 0.5 ? 2 - mx - mn : mx + mn);
+  let h;
+  if (mx === r) h = (g - b) / d + (g < b ? 6 : 0);
+  else if (mx === g) h = (b - r) / d + 2;
+  else h = (r - g) / d + 4;
+  return [h * 60, s * 100, l * 100];
+}
+
+function applyTheme(theme) {
+  const [h, s, l] = hexToHsl(theme.surface);
+  // derived shades: lightness steps for chrome, desaturated lifts for text
+  const shade = (dl, ss = s) => `hsl(${h.toFixed(0)} ${ss.toFixed(0)}% ${Math.min(96, Math.max(0, l + dl)).toFixed(1)}%)`;
+  const text = (ll) => `hsl(${h.toFixed(0)} 13% ${ll}%)`;
+  const root = document.documentElement.style;
+  root.setProperty('--bg', shade(0));
+  root.setProperty('--panel', shade(3));
+  root.setProperty('--inset', shade(-1.5));
+  root.setProperty('--track', shade(8.5));
+  root.setProperty('--faint', text(32));
+  root.setProperty('--dim', text(42));
+  root.setProperty('--idle', text(69));
+  root.setProperty('--accent', theme.accent);
+}
+
+function buildDevModal() {
+  const modal = $('#dev');
+  const surface = $('#dev-surface');
+  const accent = $('#dev-accent');
+  let saved = { ...THEME_DEFAULT };
+  try { saved = { ...saved, ...JSON.parse(localStorage.getItem(THEME_KEY) || '{}') }; } catch { /* defaults */ }
+  surface.value = saved.surface;
+  accent.value = saved.accent;
+  applyTheme(saved);
+
+  const update = () => {
+    const t = { surface: surface.value, accent: accent.value };
+    localStorage.setItem(THEME_KEY, JSON.stringify(t));
+    applyTheme(t);
+    if (audioCtx) for (let d = 0; d < 3; d++) drawScope(d); // scope stroke reads --accent
+  };
+  surface.addEventListener('input', update);
+  accent.addEventListener('input', update);
+  $('#dev-reset').addEventListener('click', () => {
+    surface.value = THEME_DEFAULT.surface;
+    accent.value = THEME_DEFAULT.accent;
+    update();
+  });
+  $('#dev-open').addEventListener('click', () => { modal.hidden = !modal.hidden; });
+}
+
 // ---------- boot ----------
 
 async function powerOn() {
@@ -412,6 +475,7 @@ const voices = $('#voices');
 for (let d = 0; d < 3; d++) voices.appendChild(buildVoice(d));
 buildMaster();
 buildMidiStrip();
+buildDevModal();
 $('#power button').addEventListener('click', () => powerOn().catch((err) => {
   $('#power .hint').textContent = `failed to start: ${err.message}`;
   console.error(err);

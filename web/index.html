@@ -6,14 +6,15 @@
 <title>zygfred · FM drums</title>
 <style>
   :root {
+    /* two base colors (surface -> bg, accent); every other shade is computed by applyTheme() */
     --accent: #ff965a;
-    --chan-r: #6ac8ff;
     --idle: #a5aab9;
     --dim: #5f6278;
     --faint: #464a5e;
     --bg: #0d0b11;
     --panel: #151219;
     --inset: #0a080d;
+    --track: #221e2b;
   }
   * { box-sizing: border-box; margin: 0; }
   body {
@@ -54,11 +55,11 @@
   }
   .voice.hit { animation: flash 0.25s ease-out; }
   @keyframes flash {
-    0% { box-shadow: 0 0 0 1px rgba(255, 150, 90, 0.35), 0 0 24px rgba(255, 150, 90, 0.18); }
+    0% { box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent), 0 0 24px color-mix(in srgb, var(--accent) 18%, transparent); }
     100% { box-shadow: none; }
   }
   .pad {
-    background: rgba(255, 150, 90, 0.07);
+    background: color-mix(in srgb, var(--accent) 7%, transparent);
     border: none;
     border-radius: 9px;
     color: var(--accent);
@@ -69,8 +70,8 @@
     cursor: pointer;
     margin-bottom: 10px;
   }
-  .pad:hover { background: rgba(255, 150, 90, 0.11); }
-  .pad:active { background: rgba(255, 150, 90, 0.18); }
+  .pad:hover { background: color-mix(in srgb, var(--accent) 11%, transparent); }
+  .pad:active { background: color-mix(in srgb, var(--accent) 18%, transparent); }
   .pad .key { color: var(--dim); font-weight: 400; letter-spacing: 0; margin-left: 8px; }
   .row { display: flex; align-items: center; gap: 10px; }
   .label { width: 52px; color: var(--dim); flex: none; }
@@ -79,7 +80,7 @@
     flex: 1;
     height: 13px;
     border-radius: 3px;
-    background: repeating-linear-gradient(90deg, #221e2b 0 6px, transparent 6px 8px);
+    background: repeating-linear-gradient(90deg, var(--track) 0 6px, transparent 6px 8px);
     cursor: ew-resize;
     touch-action: none;
     overflow: hidden;
@@ -98,9 +99,8 @@
     margin-left: -1px;
     opacity: 0;
     pointer-events: none;
+    background: #fff;
   }
-  .tick-l { background: #fff; }
-  .tick-r { background: var(--chan-r); }
   .scope {
     width: 100%;
     height: 58px;
@@ -144,7 +144,7 @@
     cursor: pointer;
   }
   #midi .learn {
-    background: rgba(255, 150, 90, 0.07);
+    background: color-mix(in srgb, var(--accent) 7%, transparent);
     border: none;
     border-radius: 6px;
     color: var(--dim);
@@ -154,18 +154,60 @@
     cursor: pointer;
   }
   #midi .learn:hover { color: var(--idle); }
-  #midi .learn.on { color: var(--accent); background: rgba(255, 150, 90, 0.16); }
+  #midi .learn.on { color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); }
   #midi .learn:disabled { opacity: 0.4; cursor: default; }
   #midi .status { flex: 1; text-align: right; }
   #midi .status.accent { color: var(--accent); }
   .bar.armed { box-shadow: 0 0 0 1px var(--accent); }
   footer { color: var(--faint); font-size: 12px; margin-top: 26px; text-align: center; }
   footer .l { color: #cdd2e0; }
-  footer .r { color: var(--chan-r); }
+  #dev-open {
+    background: none;
+    border: none;
+    color: var(--faint);
+    font: inherit;
+    cursor: pointer;
+    padding: 0 2px;
+  }
+  #dev-open:hover { color: var(--accent); }
+  #dev {
+    position: fixed;
+    right: 22px;
+    bottom: 58px;
+    background: var(--panel);
+    border-radius: 12px;
+    padding: 16px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    box-shadow: 0 6px 30px color-mix(in srgb, #000 45%, transparent);
+    z-index: 20;
+  }
+  #dev[hidden] { display: none; }
+  .dev-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; color: var(--dim); }
+  .dev-row input {
+    width: 44px;
+    height: 26px;
+    border: none;
+    border-radius: 6px;
+    background: var(--inset);
+    padding: 2px;
+    cursor: pointer;
+  }
+  #dev-reset {
+    background: color-mix(in srgb, var(--accent) 7%, transparent);
+    border: none;
+    border-radius: 6px;
+    color: var(--dim);
+    font: inherit;
+    padding: 4px 0;
+    cursor: pointer;
+  }
+  #dev-reset:hover { color: var(--idle); }
   #power {
     position: fixed;
     inset: 0;
-    background: rgba(13, 11, 17, 0.95);
+    background: color-mix(in srgb, var(--bg) 95%, transparent);
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -174,7 +216,7 @@
     z-index: 10;
   }
   #power button {
-    background: rgba(255, 150, 90, 0.09);
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
     border: none;
     border-radius: 10px;
     color: var(--accent);
@@ -185,7 +227,7 @@
     padding: 16px 42px;
     cursor: pointer;
   }
-  #power button:hover { background: rgba(255, 150, 90, 0.15); }
+  #power button:hover { background: color-mix(in srgb, var(--accent) 15%, transparent); }
   #power .hint { color: var(--faint); }
 </style>
 </head>
@@ -194,7 +236,12 @@
   <div id="voices"></div>
   <div id="master"></div>
   <div id="midi"></div>
-  <footer>a / s / d trigger &#183; click pads &#183; drag or scroll the bars &#183; <span class="l">white</span>/<span class="r">blue</span> ticks = where L/R landed on the last hit (Rand)</footer>
+  <footer>a / s / d trigger &#183; click pads &#183; drag or scroll the bars &#183; <span class="l">tick</span> = where the last hit landed (Rand) &#183; <button id="dev-open" title="theme">&#9881;</button></footer>
+  <div id="dev" hidden>
+    <div class="dev-row"><span>surface</span><input type="color" id="dev-surface"></div>
+    <div class="dev-row"><span>accent</span><input type="color" id="dev-accent"></div>
+    <button id="dev-reset">reset</button>
+  </div>
   <div id="power">
     <button>&#9670; power on</button>
     <div class="hint">browsers need a click before audio can start</div>
