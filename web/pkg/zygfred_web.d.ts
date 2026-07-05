@@ -23,7 +23,7 @@ export class Engine {
      * Play one hit. The caller (UI thread) owns param state and the per-hit randomisation, so it
      * passes the already-perturbed L/R takes plus the derived stereo/length values.
      */
-    trigger_voice(vl: Float32Array, vr: Float32Array, vel: number, mul_l: number, mul_r: number, haas: number, len: number): void;
+    trigger_voice(vl: Float32Array, vr: Float32Array, vel: number, haas: number, width: number, len: number): void;
 }
 
 /**
@@ -47,7 +47,7 @@ export interface InitOutput {
     readonly engine_set_drive: (a: number, b: number) => void;
     readonly engine_set_reverb: (a: number, b: number) => void;
     readonly engine_set_volume: (a: number, b: number) => void;
-    readonly engine_trigger_voice: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => void;
+    readonly engine_trigger_voice: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => void;
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;

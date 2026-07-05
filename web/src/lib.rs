@@ -13,9 +13,9 @@ pub const BLOCK: usize = 128; // AudioWorklet render quantum
 
 // ---------- drum voice (generalized FM percussion) ----------
 
-/// One mono FM percussion voice from the 9 sound params. `pitch_mul` detunes it (for L/R).
-fn drum_mono(v: [f32; 9], vel: f32, pitch_mul: f64) -> An<impl AudioNode<Inputs = U0, Outputs = U1>> {
-    let base = (30.0 * 300.0_f32.powf(v[0])) as f64 * pitch_mul; // 30..9000 Hz (exp)
+/// One mono FM percussion voice from the 9 sound params.
+fn drum_mono(v: [f32; 9], vel: f32) -> An<impl AudioNode<Inputs = U0, Outputs = U1>> {
+    let base = (30.0 * 300.0_f32.powf(v[0])) as f64; // 30..9000 Hz (exp)
     let ratio = (0.5 + v[1] * 7.5) as f64; // 0.5..8
     let fm_idx = (v[2] * 8.0) as f64; // modulation index
     let fmdec = (5.0 + v[3] * 70.0) as f64; // fm index decay rate
@@ -36,23 +36,26 @@ fn drum_mono(v: [f32; 9], vel: f32, pitch_mul: f64) -> An<impl AudioNode<Inputs 
     osc + noise_part
 }
 
-/// Stereo voice: independently-perturbed L/R takes, detuned apart, R Haas-delayed. 0 in, 2 out.
+/// Stereo voice: independently-perturbed L/R takes, R Haas-delayed. 0 in, 2 out.
+/// `width` 0..1 blends the right channel from the left take (mono) to the right take (stereo);
+/// the left channel always carries the pure left take.
 fn build_drum_stereo(
     vl: [f32; 9],
     vr: [f32; 9],
     vel: f32,
-    mul_l: f64,
-    mul_r: f64,
     haas: f64,
+    width: f32,
 ) -> Box<dyn AudioUnit> {
-    let l = drum_mono(vl, vel, mul_l);
+    let l = drum_mono(vl, vel);
+    let w = width.clamp(0.0, 1.0);
+    let mix = move |f: &Frame<f32, U2>| (f[0], (1.0 - w) * f[0] + w * f[1]);
     if haas > 0.0005 {
-        let r = drum_mono(vr, vel, mul_r) >> delay(haas as f32);
-        Box::new(l | r)
+        let r = drum_mono(vr, vel) >> delay(haas as f32);
+        Box::new((l | r) >> map(mix))
     } else {
         // no Haas: skip the delay node entirely (a 0-length delay is a glitch hazard)
-        let r = drum_mono(vr, vel, mul_r);
-        Box::new(l | r)
+        let r = drum_mono(vr, vel);
+        Box::new((l | r) >> map(mix))
     }
 }
 
@@ -199,9 +202,8 @@ impl Engine {
         vl: &[f32],
         vr: &[f32],
         vel: f32,
-        mul_l: f64,
-        mul_r: f64,
         haas: f64,
+        width: f32,
         len: f64,
     ) {
         if vl.len() < 9 || vr.len() < 9 {
@@ -209,7 +211,7 @@ impl Engine {
         }
         let vl: [f32; 9] = vl[..9].try_into().unwrap();
         let vr: [f32; 9] = vr[..9].try_into().unwrap();
-        let voice = build_drum_stereo(vl, vr, vel, mul_l, mul_r, haas);
+        let voice = build_drum_stereo(vl, vr, vel, haas, width);
         self.sequencer
             .push_relative(0.0, len, Fade::Smooth, 0.001, 0.02, voice);
     }
@@ -241,7 +243,7 @@ pub fn capture_scope(params: &[f32], sample_rate: f32) -> Vec<f32> {
     for i in 0..std::cmp::Ord::min(9, params.len()) {
         snd[i] = params[i];
     }
-    let mut v: Box<dyn AudioUnit> = Box::new(drum_mono(snd, 0.95, 1.0));
+    let mut v: Box<dyn AudioUnit> = Box::new(drum_mono(snd, 0.95));
     v.set_sample_rate(sample_rate as f64);
     v.allocate();
     let window = (0.05 * sample_rate) as usize; // ~50 ms

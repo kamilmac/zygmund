@@ -12,7 +12,7 @@ export const engine_set_comp: (a: number, b: number) => void;
 export const engine_set_drive: (a: number, b: number) => void;
 export const engine_set_reverb: (a: number, b: number) => void;
 export const engine_set_volume: (a: number, b: number) => void;
-export const engine_trigger_voice: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => void;
+export const engine_trigger_voice: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => void;
 export const __wbindgen_externrefs: WebAssembly.Table;
 export const __wbindgen_malloc: (a: number, b: number) => number;
 export const __wbindgen_free: (a: number, b: number, c: number) => void;

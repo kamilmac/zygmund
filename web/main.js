@@ -2,7 +2,10 @@
 // over its message port, and renders per-voice scopes via a main-thread wasm instance.
 import init, { capture_scope } from './pkg/zygfred_web.js';
 
-const PARAMS = ['Tune', 'Ratio', 'FM', 'FMDec', 'PEnv', 'PDec', 'Decay', 'Snap', 'Tone', 'Haas', 'Detune', 'Rand', 'Vol'];
+const PARAMS = ['Tune', 'Ratio', 'FM', 'FMDec', 'PEnv', 'PDec', 'Decay', 'Snap', 'Tone', 'Haas', 'Rand', 'Width', 'Vol'];
+const P_HAAS = 9;
+const P_RAND = 10;
+const P_WIDTH = 11; // 0 = mono (left take on both channels), 1 = full stereo (L take left, R take right)
 const P_VOL = 12; // per-voice gain, applied on the velocity path (voice amp is linear in vel)
 const DRUMS = [
   { name: 'KICK', key: 'A' },
@@ -20,9 +23,9 @@ const MASTER = [
   { name: 'Volume', msg: 'volume', value: 0.7 },
 ];
 const DEFAULTS = [
-  [0.18, 0.10, 0.20, 0.70, 0.55, 0.65, 0.45, 0.10, 0.10, 0.10, 0.10, 0.15, 1.00],
-  [0.42, 0.25, 0.40, 0.60, 0.20, 0.70, 0.25, 0.70, 0.50, 0.25, 0.30, 0.35, 1.00],
-  [0.72, 0.45, 0.60, 0.20, 0.00, 0.50, 0.12, 0.60, 0.80, 0.35, 0.40, 0.40, 1.00],
+  [0.18, 0.10, 0.20, 0.70, 0.55, 0.65, 0.45, 0.10, 0.10, 0.10, 0.15, 1.00, 1.00],
+  [0.42, 0.25, 0.40, 0.60, 0.20, 0.70, 0.25, 0.70, 0.50, 0.25, 0.35, 1.00, 1.00],
+  [0.72, 0.45, 0.60, 0.20, 0.00, 0.50, 0.12, 0.60, 0.80, 0.35, 0.40, 1.00, 1.00],
 ];
 // same trigger mapping as native: keys are semitones, pitch classes C/D/E hit kick/snare/hihat
 const KEY_SEMITONE = { a: 0, w: 1, s: 2, e: 3, d: 4, f: 5, t: 6, g: 7, y: 8, h: 9, u: 10, j: 11, k: 12 };
@@ -157,19 +160,17 @@ function trigger(drum, vel = 0.9) {
   // per-hit randomisation happens here, not in the engine, so the UI can show where the
   // L/R takes actually landed (slider ticks) and render this hit's real waveform (scope)
   const p = drums[drum];
-  const rand = p[11];
+  const rand = p[P_RAND];
   const vl = new Float32Array(9);
   const vr = new Float32Array(9);
   for (let i = 0; i < 9; i++) {
     vl[i] = clamp01(p[i] + rand * 0.15 * rnd());
     vr[i] = clamp01(p[i] + rand * 0.15 * rnd());
   }
-  const det = p[10] * 40; // up to 40 cents L/R spread
   send({
     type: 'trigger', vl, vr, vel: vel * p[P_VOL],
-    mulL: 2 ** (-det / 2 / 1200),
-    mulR: 2 ** (det / 2 / 1200),
-    haas: p[9] * 0.03, // 0..30 ms inter-channel delay
+    haas: p[P_HAAS] * 0.03, // 0..30 ms inter-channel delay
+    width: p[P_WIDTH],
     len: 0.08 + 1.8 * p[6],
   });
   for (let i = 0; i < 9; i++) tickSetters[drum][i]?.(vl[i]);
@@ -371,7 +372,7 @@ function buildMidiStrip() {
 // ---------- theme (dev modal: 2 base colors, every other shade derived) ----------
 
 const THEME_KEY = 'zygfred-theme';
-const THEME_DEFAULT = { surface: '#0d0b11', accent: '#ff965a' };
+const THEME_DEFAULT = { surface: '#141414', accent: '#e1ad6d' };
 
 function hexToHsl(hex) {
   const n = parseInt(hex.slice(1), 16);

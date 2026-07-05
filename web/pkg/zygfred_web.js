@@ -78,17 +78,16 @@ export class Engine {
      * @param {Float32Array} vl
      * @param {Float32Array} vr
      * @param {number} vel
-     * @param {number} mul_l
-     * @param {number} mul_r
      * @param {number} haas
+     * @param {number} width
      * @param {number} len
      */
-    trigger_voice(vl, vr, vel, mul_l, mul_r, haas, len) {
+    trigger_voice(vl, vr, vel, haas, width, len) {
         const ptr0 = passArrayF32ToWasm0(vl, wasm.__wbindgen_malloc);
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passArrayF32ToWasm0(vr, wasm.__wbindgen_malloc);
         const len1 = WASM_VECTOR_LEN;
-        wasm.engine_trigger_voice(this.__wbg_ptr, ptr0, len0, ptr1, len1, vel, mul_l, mul_r, haas, len);
+        wasm.engine_trigger_voice(this.__wbg_ptr, ptr0, len0, ptr1, len1, vel, haas, width, len);
     }
 }
 if (Symbol.dispose) Engine.prototype[Symbol.dispose] = Engine.prototype.free;
