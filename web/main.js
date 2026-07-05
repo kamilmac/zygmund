@@ -371,10 +371,16 @@ function buildMidiStrip() {
 // ---------- theme (dev modal: ONE hue, every color derived from it) ----------
 
 const THEME_KEY = 'zygfred-theme';
-const THEME_DEFAULT = { hue: 22, grain: 40 }; // hue of the original orange; grain 0..100
+const THEME_DEFAULT = { hue: 22, sat: 50, contrast: 50 }; // 50/50 = the original ramp
 
-function applyTheme({ hue, grain }) {
-  const c = (s, l) => `hsl(${hue} ${s}% ${l}%)`;
+function applyTheme({ hue, sat, contrast }) {
+  const sf = sat / 50; // saturation multiplier, 50 -> 1.0
+  const cf = 0.5 + contrast / 100; // lightness-ladder stretch around bg, 50 -> 1.0
+  const c = (s, l) => {
+    const ss = Math.min(100, s * sf);
+    const ll = Math.min(95, Math.max(2, 5.5 + (l - 5.5) * cf));
+    return `hsl(${hue} ${ss.toFixed(1)}% ${ll.toFixed(1)}%)`;
+  };
   const root = document.documentElement.style;
   // surfaces: low-sat dark ladder · text: barely tinted greys · accent: same hue, full sat
   root.setProperty('--bg', c(21, 5.5));
@@ -385,43 +391,42 @@ function applyTheme({ hue, grain }) {
   root.setProperty('--dim', c(13, 42));
   root.setProperty('--idle', c(12, 69));
   root.setProperty('--accent', c(100, 67));
-  root.setProperty('--grain', (grain / 100) * 0.12); // 100% -> heavy but usable
 }
 
 function loadTheme() {
+  const theme = { ...THEME_DEFAULT };
   try {
-    const t = JSON.parse(localStorage.getItem(THEME_KEY) || 'null');
-    if (t && typeof t.hue === 'number') return { ...THEME_DEFAULT, ...t };
-  } catch { /* default */ }
-  return { ...THEME_DEFAULT };
+    const t = JSON.parse(localStorage.getItem(THEME_KEY) || '{}');
+    for (const k of Object.keys(THEME_DEFAULT)) if (typeof t[k] === 'number') theme[k] = t[k];
+  } catch { /* defaults */ }
+  return theme;
 }
 
 function buildDevModal() {
   const modal = $('#dev');
-  const sliders = { hue: $('#dev-hue'), grain: $('#dev-grain') };
-  const readouts = { hue: $('#dev-hue-val'), grain: $('#dev-grain-val') };
   const theme = loadTheme();
-
+  const fields = [
+    ['hue', $('#dev-hue'), $('#dev-hue-val'), '°'],
+    ['sat', $('#dev-sat'), $('#dev-sat-val'), '%'],
+    ['contrast', $('#dev-contrast'), $('#dev-contrast-val'), '%'],
+  ];
   const refresh = () => {
-    readouts.hue.textContent = `${theme.hue}°`;
-    readouts.grain.textContent = `${theme.grain}%`;
+    for (const [k, , out, unit] of fields) out.textContent = `${theme[k]}${unit}`;
     applyTheme(theme);
   };
   const update = () => {
-    theme.hue = +sliders.hue.value;
-    theme.grain = +sliders.grain.value;
+    for (const [k, input] of fields) theme[k] = +input.value;
     localStorage.setItem(THEME_KEY, JSON.stringify(theme));
     refresh();
     if (audioCtx) for (let d = 0; d < 3; d++) drawScope(d); // scope stroke reads --accent
   };
-  sliders.hue.value = theme.hue;
-  sliders.grain.value = theme.grain;
+  for (const [k, input] of fields) {
+    input.value = theme[k];
+    input.addEventListener('input', update);
+  }
   refresh();
-  sliders.hue.addEventListener('input', update);
-  sliders.grain.addEventListener('input', update);
   $('#dev-reset').addEventListener('click', () => {
-    sliders.hue.value = THEME_DEFAULT.hue;
-    sliders.grain.value = THEME_DEFAULT.grain;
+    for (const [k, input] of fields) input.value = THEME_DEFAULT[k];
     update();
   });
   $('#dev-open').addEventListener('click', () => { modal.hidden = !modal.hidden; });
