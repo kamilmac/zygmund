@@ -317,6 +317,7 @@ function disarmLearn() {
 
 function onMidiMessage(e) {
   if (e.data.length < 3) return;
+  if (audioCtx && audioCtx.state === 'suspended') $('#locked').hidden = false;
   const [status, d1, d2] = e.data;
   const ch = status & 0x0f;
   if (midiChannel !== 0 && midiChannel !== ch + 1) return;
@@ -544,6 +545,7 @@ async function boot() {
 let midiStarted = false;
 function wake() {
   if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+  $('#locked').hidden = true;
   if (!midiStarted && audioCtx) {
     midiStarted = true;
     initMidi();

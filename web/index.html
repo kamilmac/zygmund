@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>zygfred · FM drums</title>
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="icon" href="./icon-192.png">
+<meta name="theme-color" content="#0b0b0b">
 <style>
   :root {
     /* two base colors (surface -> bg, accent); every other shade is computed by applyTheme().
@@ -160,6 +163,21 @@
   #midi .status.accent { color: var(--accent); }
   .bar:hover { filter: brightness(1.18); }
   .bar.armed { box-shadow: 0 0 0 1px var(--accent); }
+  #locked {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    background: var(--accent);
+    color: var(--bg);
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-align: center;
+    padding: 10px;
+    z-index: 30;
+    cursor: pointer;
+  }
+  #locked[hidden] { display: none; }
   footer { color: var(--faint); font-size: 12px; margin-top: 20px; text-align: center; }
   footer .l { color: #cdd2e0; }
   #dev-open {
@@ -205,6 +223,7 @@
 </style>
 </head>
 <body>
+  <div id="locked" hidden>MIDI received &#183; audio is locked by the browser &#183; click anywhere</div>
   <h1>&#9670; zygfred <span class="sub">&#183; FM drums</span></h1>
   <div id="voices"></div>
   <div id="master"></div>

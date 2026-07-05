@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 VER=$(git rev-parse --short HEAD)
 SITE=$(mktemp -d)
 
-cp index.html main.js worklet.js worklet-polyfill.js "$SITE/"
+cp index.html main.js worklet.js worklet-polyfill.js manifest.webmanifest icon-192.png icon-512.png "$SITE/"
 cp -R pkg "$SITE/pkg"
 rm -f "$SITE/pkg/.gitignore" # wasm-pack regenerates it with '*' — it would exclude pkg from the deploy commit
 touch "$SITE/.nojekyll"
