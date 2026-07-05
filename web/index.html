@@ -61,7 +61,7 @@
     100% { box-shadow: none; }
   }
   .pad {
-    background: color-mix(in srgb, var(--accent) 7%, transparent);
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
     border: none;
     color: var(--accent);
     font: inherit;
@@ -70,10 +70,25 @@
     padding: 12px;
     cursor: pointer;
     margin-bottom: 12px;
+    /* keycap: raised bottom edge that depresses on press */
+    box-shadow: inset 0 -3px 0 color-mix(in srgb, var(--accent) 28%, transparent);
   }
-  .pad:hover { background: color-mix(in srgb, var(--accent) 11%, transparent); }
-  .pad:active { background: color-mix(in srgb, var(--accent) 18%, transparent); }
-  .pad .key { color: var(--dim); font-weight: 400; letter-spacing: 0; margin-left: 8px; }
+  .pad:hover { background: color-mix(in srgb, var(--accent) 13%, transparent); }
+  .pad:active {
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--accent) 28%, transparent);
+    transform: translateY(2px);
+    padding-bottom: 10px;
+  }
+  .pad .key {
+    color: var(--dim);
+    font-weight: 400;
+    letter-spacing: 0;
+    margin-left: 10px;
+    background: color-mix(in srgb, #000 35%, transparent);
+    padding: 1px 8px;
+    box-shadow: inset 0 -2px 0 color-mix(in srgb, #000 55%, transparent);
+  }
   .row { display: flex; align-items: center; gap: 10px; }
   .voice .row.sect { margin-top: 12px; }
   .label { width: 52px; color: var(--dim); flex: none; }
