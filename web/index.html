@@ -29,7 +29,7 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: 48px 24px 40px;
+    padding: 40px 24px;
     user-select: none;
     -webkit-user-select: none;
   }
@@ -38,7 +38,7 @@
     font-size: 14px;
     font-weight: 700;
     letter-spacing: 3px;
-    margin-bottom: 36px;
+    margin-bottom: 40px;
     width: min(886px, 100%); /* align with the panel row's left edge */
     text-align: left;
   }
@@ -54,7 +54,7 @@
   .voice[data-voice="2"] { --accent: var(--voice2); }
   .voice {
     background: var(--panel);
-    padding: 22px 20px 20px;
+    padding: 20px;
     width: 282px;
     display: flex;
     flex-direction: column;
@@ -73,15 +73,15 @@
     font: inherit;
     font-weight: 700;
     letter-spacing: 2px;
-    padding: 11px;
+    padding: 12px;
     cursor: pointer;
-    margin-bottom: 10px;
+    margin-bottom: 12px;
   }
   .pad:hover { background: color-mix(in srgb, var(--accent) 11%, transparent); }
   .pad:active { background: color-mix(in srgb, var(--accent) 18%, transparent); }
   .pad .key { color: var(--dim); font-weight: 400; letter-spacing: 0; margin-left: 8px; }
   .row { display: flex; align-items: center; gap: 10px; }
-  .voice .row.sect { margin-top: 10px; }
+  .voice .row.sect { margin-top: 12px; }
   .label { width: 52px; color: var(--dim); flex: none; }
   .row .val { width: 40px; text-align: right; color: var(--dim); flex: none; }
   .bar {
@@ -113,14 +113,14 @@
     height: 58px;
     background: var(--inset);
     border: none;
-    margin: 8px 0;
+    margin: 12px 0;
   }
   #master {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-    gap: 10px 32px;
+    gap: 8px 32px;
     background: var(--panel);
-    padding: 18px 26px;
+    padding: 20px;
     margin-top: 20px;
     width: min(886px, 100%);
   }
@@ -129,7 +129,7 @@
     align-items: center;
     gap: 14px;
     background: var(--panel);
-    padding: 10px 20px;
+    padding: 12px 20px;
     margin-top: 20px;
     width: min(886px, 100%);
     font-size: 12px;
@@ -160,7 +160,7 @@
   #midi .status.accent { color: var(--accent); }
   .bar:hover { filter: brightness(1.18); }
   .bar.armed { box-shadow: 0 0 0 1px var(--accent); }
-  footer { color: var(--faint); font-size: 12px; margin-top: 26px; text-align: center; }
+  footer { color: var(--faint); font-size: 12px; margin-top: 20px; text-align: center; }
   footer .l { color: #cdd2e0; }
   #dev-open {
     background: none;
@@ -176,10 +176,10 @@
     right: 22px;
     bottom: 58px;
     background: var(--panel);
-    padding: 16px 18px;
+    padding: 20px;
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 12px;
     box-shadow: 0 6px 30px color-mix(in srgb, #000 45%, transparent);
     z-index: 20;
   }
