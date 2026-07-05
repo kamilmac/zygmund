@@ -368,65 +368,66 @@ function buildMidiStrip() {
   strip.append(tag, chSel, learnBtn, status);
 }
 
-// ---------- theme (dev modal: ONE hue, every color derived from it) ----------
+// ---------- theme (dev modal: 2 base colors, every other shade derived) ----------
 
 const THEME_KEY = 'zygfred-theme';
-const THEME_DEFAULT = { hue: 22, sat: 50, contrast: 50 }; // 50/50 = the original ramp
+const THEME_DEFAULT = { surface: '#0d0b11', accent: '#ff965a' };
 
-function applyTheme({ hue, sat, contrast }) {
-  const sf = sat / 50; // saturation multiplier, 50 -> 1.0
-  const cf = 0.5 + contrast / 100; // lightness-ladder stretch around bg, 50 -> 1.0
-  const c = (s, l) => {
-    const ss = Math.min(100, s * sf);
-    const ll = Math.min(95, Math.max(2, 5.5 + (l - 5.5) * cf));
-    return `hsl(${hue} ${ss.toFixed(1)}% ${ll.toFixed(1)}%)`;
-  };
-  const root = document.documentElement.style;
-  // surfaces: low-sat dark ladder · text: barely tinted greys · accent: same hue, full sat
-  root.setProperty('--bg', c(21, 5.5));
-  root.setProperty('--panel', c(20, 8.5));
-  root.setProperty('--inset', c(20, 4));
-  root.setProperty('--track', c(18, 14));
-  root.setProperty('--faint', c(13, 32));
-  root.setProperty('--dim', c(13, 42));
-  root.setProperty('--idle', c(12, 69));
-  root.setProperty('--accent', c(100, 67));
+function hexToHsl(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  const r = ((n >> 16) & 255) / 255;
+  const g = ((n >> 8) & 255) / 255;
+  const b = (n & 255) / 255;
+  const mx = Math.max(r, g, b);
+  const mn = Math.min(r, g, b);
+  const l = (mx + mn) / 2;
+  if (mx === mn) return [0, 0, l * 100];
+  const d = mx - mn;
+  const s = d / (l > 0.5 ? 2 - mx - mn : mx + mn);
+  let h;
+  if (mx === r) h = (g - b) / d + (g < b ? 6 : 0);
+  else if (mx === g) h = (b - r) / d + 2;
+  else h = (r - g) / d + 4;
+  return [h * 60, s * 100, l * 100];
 }
 
-function loadTheme() {
-  const theme = { ...THEME_DEFAULT };
-  try {
-    const t = JSON.parse(localStorage.getItem(THEME_KEY) || '{}');
-    for (const k of Object.keys(THEME_DEFAULT)) if (typeof t[k] === 'number') theme[k] = t[k];
-  } catch { /* defaults */ }
-  return theme;
+function applyTheme(theme) {
+  const [h, s, l] = hexToHsl(theme.surface);
+  // derived shades: lightness steps for chrome, desaturated lifts for text
+  const shade = (dl, ss = s) => `hsl(${h.toFixed(0)} ${ss.toFixed(0)}% ${Math.min(96, Math.max(0, l + dl)).toFixed(1)}%)`;
+  const text = (ll) => `hsl(${h.toFixed(0)} 13% ${ll}%)`;
+  const root = document.documentElement.style;
+  root.setProperty('--bg', shade(0));
+  root.setProperty('--panel', shade(3));
+  root.setProperty('--inset', shade(-1.5));
+  root.setProperty('--track', shade(8.5));
+  root.setProperty('--faint', text(32));
+  root.setProperty('--dim', text(42));
+  root.setProperty('--idle', text(69));
+  root.setProperty('--accent', theme.accent);
 }
 
 function buildDevModal() {
   const modal = $('#dev');
-  const theme = loadTheme();
-  const fields = [
-    ['hue', $('#dev-hue'), $('#dev-hue-val'), '°'],
-    ['sat', $('#dev-sat'), $('#dev-sat-val'), '%'],
-    ['contrast', $('#dev-contrast'), $('#dev-contrast-val'), '%'],
-  ];
-  const refresh = () => {
-    for (const [k, , out, unit] of fields) out.textContent = `${theme[k]}${unit}`;
-    applyTheme(theme);
-  };
+  const surface = $('#dev-surface');
+  const accent = $('#dev-accent');
+  let saved = { ...THEME_DEFAULT };
+  try { saved = { ...saved, ...JSON.parse(localStorage.getItem(THEME_KEY) || '{}') }; } catch { /* defaults */ }
+  surface.value = saved.surface;
+  accent.value = saved.accent;
+  applyTheme(saved);
+
   const update = () => {
-    for (const [k, input] of fields) theme[k] = +input.value;
-    localStorage.setItem(THEME_KEY, JSON.stringify(theme));
-    refresh();
+    const t = { surface: surface.value, accent: accent.value };
+    localStorage.setItem(THEME_KEY, JSON.stringify(t));
+    applyTheme(t);
     if (audioCtx) for (let d = 0; d < 3; d++) drawScope(d); // scope stroke reads --accent
   };
-  for (const [k, input] of fields) {
-    input.value = theme[k];
-    input.addEventListener('input', update);
-  }
-  refresh();
+  surface.addEventListener('input', update);
+  accent.addEventListener('input', update);
   $('#dev-reset').addEventListener('click', () => {
-    for (const [k, input] of fields) input.value = THEME_DEFAULT[k];
+    surface.value = THEME_DEFAULT.surface;
+    accent.value = THEME_DEFAULT.accent;
     update();
   });
   $('#dev-open').addEventListener('click', () => { modal.hidden = !modal.hidden; });

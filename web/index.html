@@ -185,33 +185,13 @@
   }
   #dev[hidden] { display: none; }
   .dev-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; color: var(--dim); }
-  #dev-hue {
-    -webkit-appearance: none;
-    appearance: none;
-    width: 190px;
-    height: 10px;
-    border-radius: 5px;
-    background: linear-gradient(90deg,
-      hsl(0 80% 55%), hsl(60 80% 55%), hsl(120 80% 55%),
-      hsl(180 80% 55%), hsl(240 80% 55%), hsl(300 80% 55%), hsl(360 80% 55%));
-    cursor: pointer;
-  }
-  #dev-hue::-webkit-slider-thumb,
-  .dev-slider::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    width: 16px;
-    height: 16px;
-    border-radius: 50%;
-    background: var(--accent);
-    border: 2px solid #fff;
-  }
-  .dev-slider {
-    -webkit-appearance: none;
-    appearance: none;
-    width: 190px;
-    height: 10px;
-    border-radius: 5px;
-    background: linear-gradient(90deg, var(--inset), var(--idle));
+  .dev-row input {
+    width: 44px;
+    height: 26px;
+    border: none;
+    border-radius: 6px;
+    background: var(--inset);
+    padding: 2px;
     cursor: pointer;
   }
   #dev-reset {
@@ -258,12 +238,8 @@
   <div id="midi"></div>
   <footer>a / s / d trigger &#183; click pads &#183; drag or scroll the bars &#183; <span class="l">tick</span> = where the last hit landed (Rand) &#183; <button id="dev-open" title="theme">&#9881;</button></footer>
   <div id="dev" hidden>
-    <div class="dev-row"><span>hue</span><span id="dev-hue-val"></span></div>
-    <input type="range" id="dev-hue" min="0" max="360" step="1">
-    <div class="dev-row"><span>saturation</span><span id="dev-sat-val"></span></div>
-    <input type="range" id="dev-sat" min="0" max="100" step="1" class="dev-slider">
-    <div class="dev-row"><span>contrast</span><span id="dev-contrast-val"></span></div>
-    <input type="range" id="dev-contrast" min="0" max="100" step="1" class="dev-slider">
+    <div class="dev-row"><span>surface</span><input type="color" id="dev-surface"></div>
+    <div class="dev-row"><span>accent</span><input type="color" id="dev-accent"></div>
     <button id="dev-reset">reset</button>
   </div>
   <div id="power">
