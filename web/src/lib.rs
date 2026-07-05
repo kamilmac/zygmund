@@ -8,7 +8,6 @@
 use fundsp::prelude64::*;
 use wasm_bindgen::prelude::*;
 
-pub const NP: usize = 12; // params per drum: 9 sound + Haas/Detune/Rand stereo props
 pub const SCOPE_N: usize = 64;
 pub const BLOCK: usize = 128; // AudioWorklet render quantum
 
@@ -55,10 +54,6 @@ fn build_drum_stereo(
         let r = drum_mono(vr, vel, mul_r);
         Box::new(l | r)
     }
-}
-
-fn drum_length(p: &[f32; NP]) -> f64 {
-    (0.08 + 1.8 * p[6]) as f64
 }
 
 // ---------- master net ----------
@@ -123,8 +118,6 @@ pub struct Engine {
     comp_sh: Shared,
     vol_sh: Shared,
     quant: f32, // bit-crush levels (0 = off), applied post-net like the native callback
-    drums: [[f32; NP]; 3],
-    rng: u64,
     buf_l: [f32; BLOCK],
     buf_r: [f32; BLOCK],
 }
@@ -152,13 +145,6 @@ impl Engine {
         );
         let backend = BlockRateAdapter::new(Box::new(net.backend()));
 
-        // defaults: rough kick / snare / hihat
-        let drums = [
-            [0.18, 0.10, 0.20, 0.70, 0.55, 0.65, 0.45, 0.10, 0.10, 0.10, 0.10, 0.15],
-            [0.42, 0.25, 0.40, 0.60, 0.20, 0.70, 0.25, 0.70, 0.50, 0.25, 0.30, 0.35],
-            [0.72, 0.45, 0.60, 0.20, 0.00, 0.50, 0.12, 0.60, 0.80, 0.35, 0.40, 0.40],
-        ];
-
         Engine {
             sequencer,
             _net: net,
@@ -168,16 +154,8 @@ impl Engine {
             comp_sh,
             vol_sh,
             quant: 0.0,
-            drums,
-            rng: 0x1234_5678_9abc_def1,
             buf_l: [0.0; BLOCK],
             buf_r: [0.0; BLOCK],
-        }
-    }
-
-    pub fn set_drum_param(&mut self, drum: usize, param: usize, value: f32) {
-        if drum < 3 && param < NP {
-            self.drums[drum][param] = value.clamp(0.0, 1.0);
         }
     }
 
@@ -202,35 +180,24 @@ impl Engine {
         self.quant = levels;
     }
 
-    fn rnd(&mut self) -> f32 {
-        let mut x = self.rng;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.rng = x;
-        ((x >> 40) as f32 / (1u64 << 24) as f32) * 2.0 - 1.0
-    }
-
-    pub fn trigger(&mut self, drum: usize, vel: f32) {
-        if drum >= 3 {
+    /// Play one hit. The caller (UI thread) owns param state and the per-hit randomisation, so it
+    /// passes the already-perturbed L/R takes plus the derived stereo/length values.
+    pub fn trigger_voice(
+        &mut self,
+        vl: &[f32],
+        vr: &[f32],
+        vel: f32,
+        mul_l: f64,
+        mul_r: f64,
+        haas: f64,
+        len: f64,
+    ) {
+        if vl.len() < 9 || vr.len() < 9 {
             return;
         }
-        let p = self.drums[drum];
-        let snd: [f32; 9] = p[..9].try_into().unwrap();
-        let haas = (p[9] * 0.03) as f64; // 0..30 ms inter-channel delay
-        let det_cents = (p[10] * 40.0) as f64; // up to 40 cents L/R spread
-        let rand = p[11];
-        // per-channel randomiser: nudge each sound param a little differently on L and R, per hit
-        let mut vl = snd;
-        let mut vr = snd;
-        for i in 0..9 {
-            vl[i] = (snd[i] + rand * 0.15 * self.rnd()).clamp(0.0, 1.0);
-            vr[i] = (snd[i] + rand * 0.15 * self.rnd()).clamp(0.0, 1.0);
-        }
-        let mul_l = 2f64.powf(-det_cents / 2.0 / 1200.0);
-        let mul_r = 2f64.powf(det_cents / 2.0 / 1200.0);
+        let vl: [f32; 9] = vl[..9].try_into().unwrap();
+        let vr: [f32; 9] = vr[..9].try_into().unwrap();
         let voice = build_drum_stereo(vl, vr, vel, mul_l, mul_r, haas);
-        let len = drum_length(&p);
         self.sequencer
             .push_relative(0.0, len, Fade::Smooth, 0.001, 0.02, voice);
     }

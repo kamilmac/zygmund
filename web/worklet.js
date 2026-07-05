@@ -16,8 +16,7 @@ class ZygfredProcessor extends AudioWorkletProcessor {
 
   onMessage(m) {
     switch (m.type) {
-      case 'trigger': this.engine.trigger(m.drum, m.vel); break;
-      case 'drum': this.engine.set_drum_param(m.drum, m.param, m.value); break;
+      case 'trigger': this.engine.trigger_voice(m.vl, m.vr, m.vel, m.mulL, m.mulR, m.haas, m.len); break;
       case 'drive': this.engine.set_drive(m.value); break;
       case 'reverb': this.engine.set_reverb(m.value); break;
       case 'comp': this.engine.set_comp(m.value); break;

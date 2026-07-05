@@ -79,6 +79,8 @@ function makeBar({ getNorm, setNorm, getLabel, discreteSteps }) {
   return { bar, val, refresh };
 }
 
+const tickSetters = [[], [], []]; // [drum][param] -> (l, r), sound params only
+
 function paramRow(drum, pi) {
   const row = document.createElement('div');
   row.className = 'row';
@@ -87,12 +89,22 @@ function paramRow(drum, pi) {
   label.textContent = PARAMS[pi];
   const { bar, val } = makeBar({
     getNorm: () => drums[drum][pi],
-    setNorm: (n) => {
-      drums[drum][pi] = n;
-      send({ type: 'drum', drum, param: pi, value: n });
-    },
+    setNorm: (n) => { drums[drum][pi] = n; }, // params are read per hit, at trigger time
     getLabel: () => `${Math.round(drums[drum][pi] * 100)}%`,
   });
+  if (pi < 9) {
+    // per-hit randomisation markers: where the L/R takes actually landed on the last trigger
+    const tl = document.createElement('div');
+    tl.className = 'tick tick-l';
+    const tr = document.createElement('div');
+    tr.className = 'tick tick-r';
+    bar.append(tl, tr);
+    tickSetters[drum][pi] = (l, r) => {
+      tl.style.left = `${l * 100}%`;
+      tr.style.left = `${r * 100}%`;
+      tl.style.opacity = tr.style.opacity = 1;
+    };
+  }
   row.append(label, bar, val);
   return row;
 }
@@ -101,30 +113,60 @@ function paramRow(drum, pi) {
 
 const scopeCanvases = [];
 
-function drawScope(drum) {
+function drawScope(drum, vl, vr) {
   const canvas = scopeCanvases[drum];
   if (!canvas || !audioCtx) return;
-  const pts = capture_scope(new Float32Array(drums[drum].slice(0, 9)), audioCtx.sampleRate);
   const g = canvas.getContext('2d');
   const { width: w, height: h } = canvas;
   g.clearRect(0, 0, w, h);
-  g.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--accent');
-  g.lineWidth = 1.5;
-  g.beginPath();
-  for (let i = 0; i < pts.length; i++) {
-    const x = (i / (pts.length - 1)) * w;
-    const y = h / 2 - pts[i] * (h / 2 - 2);
-    i === 0 ? g.moveTo(x, y) : g.lineTo(x, y);
+  const styles = getComputedStyle(document.documentElement);
+  const base = () => new Float32Array(drums[drum].slice(0, 9));
+  // R take first so the L take draws on top
+  const takes = [
+    [vr ? new Float32Array(vr) : base(), styles.getPropertyValue('--chan-r'), 1],
+    [vl ? new Float32Array(vl) : base(), styles.getPropertyValue('--accent'), 1.5],
+  ];
+  for (const [params, color, lineWidth] of takes) {
+    const pts = capture_scope(params, audioCtx.sampleRate);
+    g.strokeStyle = color;
+    g.lineWidth = lineWidth;
+    g.beginPath();
+    for (let i = 0; i < pts.length; i++) {
+      const x = (i / (pts.length - 1)) * w;
+      const y = h / 2 - pts[i] * (h / 2 - 2);
+      i === 0 ? g.moveTo(x, y) : g.lineTo(x, y);
+    }
+    g.stroke();
   }
-  g.stroke();
 }
 
 // ---------- voices ----------
 
+const rnd = () => Math.random() * 2 - 1;
+const clamp01 = (v) => Math.min(1, Math.max(0, v));
+
 function trigger(drum, vel = 0.9) {
   if (!node) return;
-  send({ type: 'trigger', drum, vel });
-  drawScope(drum);
+  // per-hit randomisation happens here, not in the engine, so the UI can show where the
+  // L/R takes actually landed (slider ticks) and render this hit's real waveform (scope)
+  const p = drums[drum];
+  const rand = p[11];
+  const vl = new Float32Array(9);
+  const vr = new Float32Array(9);
+  for (let i = 0; i < 9; i++) {
+    vl[i] = clamp01(p[i] + rand * 0.15 * rnd());
+    vr[i] = clamp01(p[i] + rand * 0.15 * rnd());
+  }
+  const det = p[10] * 40; // up to 40 cents L/R spread
+  send({
+    type: 'trigger', vl, vr, vel,
+    mulL: 2 ** (-det / 2 / 1200),
+    mulR: 2 ** (det / 2 / 1200),
+    haas: p[9] * 0.03, // 0..30 ms inter-channel delay
+    len: 0.08 + 1.8 * p[6],
+  });
+  for (let i = 0; i < 9; i++) tickSetters[drum][i]?.(vl[i], vr[i]);
+  drawScope(drum, vl, vr);
   const panel = document.querySelectorAll('.voice')[drum];
   panel.classList.remove('hit');
   void panel.offsetWidth; // restart the flash animation

@@ -17,10 +17,13 @@ export class Engine {
     set_bits_levels(levels: number): void;
     set_comp(v: number): void;
     set_drive(v: number): void;
-    set_drum_param(drum: number, param: number, value: number): void;
     set_reverb(v: number): void;
     set_volume(v: number): void;
-    trigger(drum: number, vel: number): void;
+    /**
+     * Play one hit. The caller (UI thread) owns param state and the per-hit randomisation, so it
+     * passes the already-perturbed L/R takes plus the derived stereo/length values.
+     */
+    trigger_voice(vl: Float32Array, vr: Float32Array, vel: number, mul_l: number, mul_r: number, haas: number, len: number): void;
 }
 
 /**
@@ -42,10 +45,9 @@ export interface InitOutput {
     readonly engine_set_bits_levels: (a: number, b: number) => void;
     readonly engine_set_comp: (a: number, b: number) => void;
     readonly engine_set_drive: (a: number, b: number) => void;
-    readonly engine_set_drum_param: (a: number, b: number, c: number, d: number) => void;
     readonly engine_set_reverb: (a: number, b: number) => void;
     readonly engine_set_volume: (a: number, b: number) => void;
-    readonly engine_trigger: (a: number, b: number, c: number) => void;
+    readonly engine_trigger_voice: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => void;
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;

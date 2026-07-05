@@ -61,14 +61,6 @@ export class Engine {
         wasm.engine_set_drive(this.__wbg_ptr, v);
     }
     /**
-     * @param {number} drum
-     * @param {number} param
-     * @param {number} value
-     */
-    set_drum_param(drum, param, value) {
-        wasm.engine_set_drum_param(this.__wbg_ptr, drum, param, value);
-    }
-    /**
      * @param {number} v
      */
     set_reverb(v) {
@@ -81,11 +73,22 @@ export class Engine {
         wasm.engine_set_volume(this.__wbg_ptr, v);
     }
     /**
-     * @param {number} drum
+     * Play one hit. The caller (UI thread) owns param state and the per-hit randomisation, so it
+     * passes the already-perturbed L/R takes plus the derived stereo/length values.
+     * @param {Float32Array} vl
+     * @param {Float32Array} vr
      * @param {number} vel
+     * @param {number} mul_l
+     * @param {number} mul_r
+     * @param {number} haas
+     * @param {number} len
      */
-    trigger(drum, vel) {
-        wasm.engine_trigger(this.__wbg_ptr, drum, vel);
+    trigger_voice(vl, vr, vel, mul_l, mul_r, haas, len) {
+        const ptr0 = passArrayF32ToWasm0(vl, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArrayF32ToWasm0(vr, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.engine_trigger_voice(this.__wbg_ptr, ptr0, len0, ptr1, len1, vel, mul_l, mul_r, haas, len);
     }
 }
 if (Symbol.dispose) Engine.prototype[Symbol.dispose] = Engine.prototype.free;
